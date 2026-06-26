@@ -500,6 +500,8 @@ CONTAINS
                                                             r2_threshold, r_c, t1, t2, t3
       REAL(KIND=dp)                                      :: e3c_abs_max, e3c_vmax, z_abs_max
       INTEGER, DIMENSION(3)                              :: e3c_atom_max, e3c_idx_max
+      REAL(KIND=dp)                                      :: j_sq_sum, j_pair_max
+      INTEGER, DIMENSION(3)                              :: j_atom_max, j_idx_max
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:)           :: cutoff_ri_per_atom, cutoff_ri_per_kind, &
                                                             d_vec_local
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: D_local, d_lp_local, phi_local, &
@@ -657,6 +659,10 @@ CONTAINS
          z_abs_max = 0.0_dp
          e3c_idx_max(:) = 0
          e3c_atom_max(:) = 0
+         j_sq_sum = 0.0_dp
+         j_pair_max = -1.0_dp
+         j_idx_max(:) = 0
+         j_atom_max(:) = 0
 
          DO atom_P = atom_P_start, natom, atom_P_stride
 
@@ -847,7 +853,8 @@ CONTAINS
                                          n_local_grid, n_loc_ri, atom_P, max_ao_size, &
                                          atom_j_mepos, atom_j_stride, &
                                          e3c_abs_max, e3c_idx_max, e3c_atom_max, &
-                                         e3c_vmax, z_abs_max)
+                                         e3c_vmax, z_abs_max, &
+                                         j_sq_sum, j_pair_max, j_idx_max, j_atom_max)
             END IF
 
             ! ---------------------------------------------------------------------
@@ -897,7 +904,8 @@ CONTAINS
          IF (bs_env%ri_rs%print_fit_error) THEN
             CALL ri_rs_fit_error_finalize(bs_env, para_env, particle_set, atomic_kind_set, &
                                           e3c_abs_max, e3c_idx_max, e3c_atom_max, &
-                                          e3c_vmax, z_abs_max)
+                                          e3c_vmax, z_abs_max, &
+                                          j_sq_sum, j_pair_max, j_idx_max, j_atom_max)
          END IF
 
          CALL dbcsr_finalize(mat_Z_lP)

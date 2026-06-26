@@ -11,9 +11,11 @@
 !>      04.2026 created [Ritaj Tyagi]
 ! **************************************************************************************************
 MODULE gw_non_periodic_ri_rs
+   USE ai_contraction_sphi,             ONLY: ab_contract
    USE atomic_kind_types,               ONLY: atomic_kind_type,&
                                               get_atomic_kind_set
-   USE basis_set_types,                 ONLY: gto_basis_set_type
+   USE basis_set_types,                 ONLY: get_gto_basis_set,&
+                                              gto_basis_set_type
    USE cell_types,                      ONLY: cell_type,&
                                               pbc
    USE constants_operator,              ONLY: operator_coulomb
@@ -56,6 +58,7 @@ MODULE gw_non_periodic_ri_rs
                                               cp_logger_type
    USE cp_output_handling,              ONLY: cp_p_file,&
                                               cp_print_key_should_output
+   USE gamma,                           ONLY: init_md_ftable
    USE gw_integrals,                    ONLY: build_3c_integral_block_ctx,&
                                               gw_3c_ctx_create,&
                                               gw_3c_ctx_release,&
@@ -68,12 +71,19 @@ MODULE gw_non_periodic_ri_rs
         create_fm_W_MIC_time, delete_unnecessary_files, fill_fm_Sigma_c_Gamma_time, fm_write, &
         multiply_fm_W_MIC_time_with_Minv_Gamma
    USE gw_utils,                        ONLY: de_init_bs_env
-   USE input_constants,                 ONLY: rtp_method_bse
+   USE input_constants,                 ONLY: do_potential_coulomb,&
+                                              rtp_method_bse
    USE input_section_types,             ONLY: section_vals_type
    USE kinds,                           ONLY: default_path_length,&
                                               default_string_length,&
                                               dp
    USE kpoint_coulomb_2c,               ONLY: build_2c_coulomb_matrix_kp
+   USE libint_2c_3c,                    ONLY: eri_2center,&
+                                              libint_potential_type
+   USE libint_wrapper,                  ONLY: cp_libint_cleanup_2eri,&
+                                              cp_libint_init_2eri,&
+                                              cp_libint_set_contrdepth,&
+                                              cp_libint_t
    USE machine,                         ONLY: m_walltime
    USE message_passing,                 ONLY: mp_para_env_type
    USE mp2_ri_2c,                       ONLY: RI_2c_integral_mat
@@ -763,6 +773,8 @@ CONTAINS
                                                             r_c, t1
       REAL(KIND=dp)                                      :: e3c_abs_max, e3c_vmax, z_abs_max
       INTEGER, DIMENSION(3)                              :: e3c_atom_max, e3c_idx_max
+      REAL(KIND=dp)                                      :: j_sq_sum, j_pair_max
+      INTEGER, DIMENSION(3)                              :: j_atom_max, j_idx_max
       REAL(KIND=dp), ALLOCATABLE                         :: cutoff_ri_per_kind(:)
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:)           :: cutoff_ri_per_atom, d_vec_local
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: D_local, d_lp_local, phi_local, &
@@ -922,6 +934,10 @@ CONTAINS
          z_abs_max = 0.0_dp
          e3c_idx_max(:) = 0
          e3c_atom_max(:) = 0
+         j_sq_sum = 0.0_dp
+         j_pair_max = -1.0_dp
+         j_idx_max(:) = 0
+         j_atom_max(:) = 0
 
          DO atom_P = atom_P_start, natom, atom_P_stride
 
@@ -1105,7 +1121,8 @@ CONTAINS
                                          n_local_grid, n_loc_ri, atom_P, max_ao_size, &
                                          atom_j_mepos, atom_j_stride, &
                                          e3c_abs_max, e3c_idx_max, e3c_atom_max, &
-                                         e3c_vmax, z_abs_max)
+                                         e3c_vmax, z_abs_max, &
+                                         j_sq_sum, j_pair_max, j_idx_max, j_atom_max)
             END IF
 
             ! ---------------------------------------------------------------------
@@ -1156,7 +1173,8 @@ CONTAINS
          IF (bs_env%ri_rs%print_fit_error) THEN
             CALL ri_rs_fit_error_finalize(bs_env, para_env, particle_set, atomic_kind_set, &
                                           e3c_abs_max, e3c_idx_max, e3c_atom_max, &
-                                          e3c_vmax, z_abs_max)
+                                          e3c_vmax, z_abs_max, &
+                                          j_sq_sum, j_pair_max, j_idx_max, j_atom_max)
          END IF
 
          CALL dbcsr_finalize(mat_Z_lP)
@@ -1334,10 +1352,17 @@ CONTAINS
 !> \param atom_max (atom_j,atom_k,atom_P) at the running max (INOUT)
 !> \param vmax_loc running max |exact 3c| (INOUT)
 !> \param zmax_loc running max |Z_lP| (INOUT)
+!> \param j_sq_sum running sum over (mu,nu) pairs of J_pair = R^T V_PP^-1 R, the Coulomb-norm
+!>        squared of the per-pair fit-error density (INOUT). R(P) = approx(mu,nu,P)-exact(mu,nu,P)
+!>        and V_PP = on-atom 2c bare-Coulomb (P|Q). Block-diagonal in atom_P (see body).
+!> \param j_pair_max running max over (mu,nu) of J_pair (squared; sqrt taken at print) (INOUT)
+!> \param j_idx_max global (mu,nu,P_start) at the running J_pair max (INOUT)
+!> \param j_atom_max (atom_j,atom_k,atom_P) at the running J_pair max (INOUT)
 ! **************************************************************************************************
    SUBROUTINE ri_rs_e3c_accumulate(bs_env, ctx, cell, phi_val, Z_lP, n_grid, n_loc_ri, &
                                    atom_P, max_ao_size, atom_j_mepos, atom_j_stride, &
-                                   e_abs_max, idx_max, atom_max, vmax_loc, zmax_loc)
+                                   e_abs_max, idx_max, atom_max, vmax_loc, zmax_loc, &
+                                   j_sq_sum, j_pair_max, j_idx_max, j_atom_max)
 
       TYPE(post_scf_bandstructure_type), POINTER         :: bs_env
       TYPE(gw_3c_ctx_type), INTENT(IN)                   :: ctx
@@ -1348,6 +1373,8 @@ CONTAINS
       REAL(KIND=dp), INTENT(IN)                          :: Z_lP(n_grid, n_loc_ri)
       REAL(KIND=dp), INTENT(INOUT)                       :: e_abs_max, vmax_loc, zmax_loc
       INTEGER, DIMENSION(3), INTENT(INOUT)               :: idx_max, atom_max
+      REAL(KIND=dp), INTENT(INOUT)                       :: j_sq_sum, j_pair_max
+      INTEGER, DIMENSION(3), INTENT(INOUT)               :: j_idx_max, j_atom_max
 
       CHARACTER(LEN=*), PARAMETER                        :: routineN = 'ri_rs_e3c_accumulate'
       INTEGER, PARAMETER                                 :: grid_chunk = 1024
@@ -1355,12 +1382,21 @@ CONTAINS
       INTEGER :: atom_j, atom_k, c, handle, ix_hi, ix_lo, ix_R, ix_S, iy_hi, iy_lo, iy_R, iy_S, &
          iz_hi, iz_lo, iz_R, iz_S, j, jk_idx, jsize, jstart, k, ksize, kstart, l, l0, n_jk, &
          natom, P_start, ri
+      INTEGER :: egfp, egfq, ikind_ri, info_solve, info_vpp, j_rec, jk, k_rec, maxl_ri, ncop, &
+         ncoq, nset_ri, nsgf_ri, pset, qset, sgfp, sgfq
       INTEGER, DIMENSION(3)                              :: cell_R_vec, cell_S_vec
-      LOGICAL                                            :: any_kept, screened
-      REAL(KIND=dp)                                      :: err, exact
-      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: approx_2d, rho_chunk
+      INTEGER, DIMENSION(:), POINTER                     :: lmax_ri, lmin_ri, npgf_ri, nsgf_set_ri
+      INTEGER, DIMENSION(:, :), POINTER                  :: first_sgf_ri
+      LOGICAL                                            :: any_kept, j_ok, screened
+      REAL(KIND=dp)                                      :: err, exact, j_p
+      REAL(KIND=dp), DIMENSION(3)                        :: pos_P_2c
+      REAL(KIND=dp), DIMENSION(:, :), POINTER            :: rpgf_ri, sphi_ri, zet_ri
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: approx_2d, R_blk, rho_chunk, V_PP, &
+                                                            V_PP_chol, work2c, Y_blk
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)     :: int_3c_prv, int_3c_sum
+      TYPE(cp_libint_t)                                  :: lib2c
       TYPE(gw_3c_ws_type)                                :: ws
+      TYPE(libint_potential_type)                        :: v_coulomb
 
       CALL timeset(routineN, handle)
 
@@ -1378,6 +1414,65 @@ CONTAINS
       ALLOCATE (int_3c_sum(max_ao_size, max_ao_size, n_loc_ri))
       ALLOCATE (approx_2d(max_ao_size*max_ao_size, n_loc_ri))
       ALLOCATE (rho_chunk(grid_chunk, max_ao_size*max_ao_size))
+
+      ! ------------------------------------------------------------------------------------------
+      ! J (Coulomb-norm) diagnostic setup: build the on-atom 2c Coulomb block V_PP = (P|Q) over
+      ! atom_P's RI aux and Cholesky-factor it. Per pair (mu nu), J_pair = R^T V_PP^-1 R with
+      ! R(P) = approx(mu,nu,P) - exact(mu,nu,P): the Coulomb self-energy of the density-fit error,
+      ! matching what the offline rirs_common.coulomb_J computes (its E is the coefficient-space
+      ! residual, so its trace E^T V E == R^T V^-1 R in integral-residual terms). BARE Coulomb is
+      ! used (offline uses int2c2e); for an on-atom block the truncated production metric differs
+      ! only by tails beyond the cutoff radius, negligible vs the per-atom aux extent. The fit is
+      ! block-diagonal in atom_P: cross-atom-P Coulomb coupling is dropped (the full coupled J is
+      ! incompatible with the memory-lean per-atom-P flow). Exact for single-atom references.
+      ! ------------------------------------------------------------------------------------------
+      ikind_ri = ctx%kind_of(atom_P)
+      CALL get_gto_basis_set(ctx%basis_i(ikind_ri)%gto_basis_set, lmax=lmax_ri, lmin=lmin_ri, &
+                             npgf=npgf_ri, nset=nset_ri, zet=zet_ri, first_sgf=first_sgf_ri, &
+                             nsgf_set=nsgf_set_ri, pgf_radius=rpgf_ri, sphi=sphi_ri, &
+                             maxl=maxl_ri, nsgf=nsgf_ri)
+
+      j_ok = (nsgf_ri == n_loc_ri)
+      IF (j_ok) THEN
+         pos_P_2c(1:3) = ctx%particle_set(atom_P)%r(1:3)
+         CALL init_md_ftable(2*maxl_ri)
+         v_coulomb%potential_type = do_potential_coulomb
+         CALL cp_libint_init_2eri(lib2c, maxl_ri)
+         CALL cp_libint_set_contrdepth(lib2c, 1)
+
+         ALLOCATE (V_PP(n_loc_ri, n_loc_ri))
+         V_PP(:, :) = 0.0_dp
+         DO pset = 1, nset_ri
+            ncop = npgf_ri(pset)*ncoset(lmax_ri(pset))
+            sgfp = first_sgf_ri(1, pset)
+            egfp = sgfp + nsgf_set_ri(pset) - 1
+            DO qset = 1, nset_ri
+               ncoq = npgf_ri(qset)*ncoset(lmax_ri(qset))
+               sgfq = first_sgf_ri(1, qset)
+               egfq = sgfq + nsgf_set_ri(qset) - 1
+               ALLOCATE (work2c(ncop, ncoq))
+               work2c(:, :) = 0.0_dp
+               CALL eri_2center(work2c, lmin_ri(pset), lmax_ri(pset), npgf_ri(pset), &
+                                zet_ri(:, pset), rpgf_ri(:, pset), pos_P_2c, &
+                                lmin_ri(qset), lmax_ri(qset), npgf_ri(qset), &
+                                zet_ri(:, qset), rpgf_ri(:, qset), pos_P_2c, &
+                                0.0_dp, lib2c, v_coulomb)
+               CALL ab_contract(V_PP(sgfp:egfp, sgfq:egfq), work2c, &
+                                sphi_ri(:, sgfp:), sphi_ri(:, sgfq:), &
+                                ncop, ncoq, nsgf_set_ri(pset), nsgf_set_ri(qset))
+               DEALLOCATE (work2c)
+            END DO
+         END DO
+         CALL cp_libint_cleanup_2eri(lib2c)
+
+         ALLOCATE (V_PP_chol(n_loc_ri, n_loc_ri))
+         V_PP_chol(:, :) = V_PP(:, :)
+         CALL dpotrf('L', n_loc_ri, V_PP_chol, n_loc_ri, info_vpp)
+         IF (info_vpp /= 0) j_ok = .FALSE.
+         DEALLOCATE (V_PP)
+         ALLOCATE (R_blk(n_loc_ri, max_ao_size*max_ao_size))
+         ALLOCATE (Y_blk(n_loc_ri, max_ao_size*max_ao_size))
+      END IF
 
       DO atom_j = atom_j_mepos + 1, natom, atom_j_stride
          DO atom_k = 1, natom
@@ -1456,13 +1551,41 @@ CONTAINS
                         atom_max(2) = atom_k
                         atom_max(3) = atom_P
                      END IF
+                     IF (j_ok) R_blk(ri, jk_idx) = approx_2d(jk_idx, ri) - exact
                   END DO
                END DO
             END DO
+
+            ! J: per pair (mu nu) solve V_PP y = R and accumulate J_pair = R^T y = R^T V_PP^-1 R.
+            IF (j_ok) THEN
+               Y_blk(1:n_loc_ri, 1:n_jk) = R_blk(1:n_loc_ri, 1:n_jk)
+               CALL dpotrs('L', n_loc_ri, n_jk, V_PP_chol, n_loc_ri, Y_blk, n_loc_ri, info_solve)
+               DO jk = 1, n_jk
+                  j_p = 0.0_dp
+                  DO ri = 1, n_loc_ri
+                     j_p = j_p + R_blk(ri, jk)*Y_blk(ri, jk)
+                  END DO
+                  j_sq_sum = j_sq_sum + j_p
+                  IF (j_p > j_pair_max) THEN
+                     j_pair_max = j_p
+                     k_rec = (jk - 1)/jsize + 1
+                     j_rec = jk - (k_rec - 1)*jsize
+                     j_idx_max(1) = jstart + j_rec - 1
+                     j_idx_max(2) = kstart + k_rec - 1
+                     j_idx_max(3) = P_start
+                     j_atom_max(1) = atom_j
+                     j_atom_max(2) = atom_k
+                     j_atom_max(3) = atom_P
+                  END IF
+               END DO
+            END IF
          END DO
       END DO
 
       DEALLOCATE (int_3c_prv, int_3c_sum, approx_2d, rho_chunk)
+      IF (ALLOCATED(V_PP_chol)) DEALLOCATE (V_PP_chol)
+      IF (ALLOCATED(R_blk)) DEALLOCATE (R_blk)
+      IF (ALLOCATED(Y_blk)) DEALLOCATE (Y_blk)
       CALL gw_3c_ws_release(ws)
 
       CALL timestop(handle)
@@ -1482,9 +1605,14 @@ CONTAINS
 !> \param atom_max per-rank (atom_j,atom_k,atom_P) at the max
 !> \param vmax_loc per-rank max |exact 3c|
 !> \param zmax_loc per-rank max |Z_lP|
+!> \param j_sq_sum per-rank sum over pairs of J_pair = R^T V_PP^-1 R (Coulomb-norm squared)
+!> \param j_pair_max per-rank max over pairs of J_pair (squared)
+!> \param j_idx_max per-rank global (mu,nu,P_start) at the J_pair max
+!> \param j_atom_max per-rank (atom_j,atom_k,atom_P) at the J_pair max
 ! **************************************************************************************************
    SUBROUTINE ri_rs_fit_error_finalize(bs_env, para_env, particle_set, atomic_kind_set, &
-                                       e_abs_max, idx_max, atom_max, vmax_loc, zmax_loc)
+                                       e_abs_max, idx_max, atom_max, vmax_loc, zmax_loc, &
+                                       j_sq_sum, j_pair_max, j_idx_max, j_atom_max)
 
       TYPE(post_scf_bandstructure_type), POINTER         :: bs_env
       TYPE(mp_para_env_type), POINTER                    :: para_env
@@ -1492,13 +1620,18 @@ CONTAINS
       TYPE(atomic_kind_type), DIMENSION(:), POINTER      :: atomic_kind_set
       REAL(KIND=dp), INTENT(IN)                          :: e_abs_max, vmax_loc, zmax_loc
       INTEGER, DIMENSION(3), INTENT(IN)                  :: idx_max, atom_max
+      REAL(KIND=dp), INTENT(IN)                          :: j_sq_sum, j_pair_max
+      INTEGER, DIMENSION(3), INTENT(IN)                  :: j_idx_max, j_atom_max
 
       CHARACTER(LEN=*), PARAMETER                        :: routineN = 'ri_rs_fit_error_finalize'
 
-      CHARACTER(LEN=2)                                   :: sym_k, sym_mu, sym_P
-      INTEGER                                            :: handle, ik, src
-      INTEGER, DIMENSION(6)                              :: loc_buf
-      REAL(KIND=dp)                                      :: e_abs_glob, e_rel_glob, v_glob, z_glob
+      CHARACTER(LEN=2)                                   :: sym_jk, sym_jmu, sym_jP, sym_k, sym_mu, &
+                                                            sym_P
+      INTEGER                                            :: handle, ik, src, src_j
+      INTEGER, DIMENSION(6)                              :: loc_buf, loc_buf_j
+      REAL(KIND=dp)                                      :: e_abs_glob, e_rel_glob, j_pair_glob, &
+                                                            j_sq_glob, sqrt_j_glob, &
+                                                            sqrt_jpair_glob, v_glob, z_glob
 
       CALL timeset(routineN, handle)
 
@@ -1522,6 +1655,24 @@ CONTAINS
       END IF
       CALL para_env%bcast(loc_buf, src)
 
+      ! J (Coulomb-norm): total = sqrt(sum_pairs J_pair); per-pair worst = sqrt(max_pairs J_pair).
+      j_sq_glob = j_sq_sum
+      CALL para_env%sum(j_sq_glob)
+      sqrt_j_glob = SQRT(MAX(j_sq_glob, 0.0_dp))
+      j_pair_glob = j_pair_max
+      CALL para_env%max(j_pair_glob)
+      sqrt_jpair_glob = SQRT(MAX(j_pair_glob, 0.0_dp))
+
+      src_j = -1
+      IF (j_pair_max == j_pair_glob) src_j = para_env%mepos
+      CALL para_env%max(src_j)
+      loc_buf_j(1:6) = 0
+      IF (para_env%mepos == src_j) THEN
+         loc_buf_j(1:3) = j_idx_max(1:3)
+         loc_buf_j(4:6) = j_atom_max(1:3)
+      END IF
+      CALL para_env%bcast(loc_buf_j, src_j)
+
       e_rel_glob = e_abs_glob/MAX(v_glob, 1.0E-300_dp)
 
       sym_mu = "??"; sym_k = "??"; sym_P = "??"
@@ -1538,6 +1689,20 @@ CONTAINS
          sym_P = atomic_kind_set(ik)%element_symbol
       END IF
 
+      sym_jmu = "??"; sym_jk = "??"; sym_jP = "??"
+      IF (loc_buf_j(4) >= 1) THEN
+         ik = particle_set(loc_buf_j(4))%atomic_kind%kind_number
+         sym_jmu = atomic_kind_set(ik)%element_symbol
+      END IF
+      IF (loc_buf_j(5) >= 1) THEN
+         ik = particle_set(loc_buf_j(5))%atomic_kind%kind_number
+         sym_jk = atomic_kind_set(ik)%element_symbol
+      END IF
+      IF (loc_buf_j(6) >= 1) THEN
+         ik = particle_set(loc_buf_j(6))%atomic_kind%kind_number
+         sym_jP = atomic_kind_set(ik)%element_symbol
+      END IF
+
       IF (bs_env%unit_nr > 0) THEN
          WRITE (bs_env%unit_nr, '(A)') ' '
          WRITE (bs_env%unit_nr, '(T2,A,ES11.3,A,I0,A,I0,A,I0,A)') &
@@ -1548,6 +1713,13 @@ CONTAINS
          WRITE (bs_env%unit_nr, '(T2,A,3(2X,I0,1X,A2))') &
             'RI-RS fit error | argmax atoms (mu nu P):', &
             loc_buf(4), sym_mu, loc_buf(5), sym_k, loc_buf(6), sym_P
+         WRITE (bs_env%unit_nr, '(T2,A,ES11.3,A,ES11.3,A,I0,A,I0,A)') &
+            'RI-RS fit error | J sqrt(tr E^T V E) = ', sqrt_j_glob, &
+            ' ; per-pair max = ', sqrt_jpair_glob, &
+            ' at (mu=', loc_buf_j(1), ' nu=', loc_buf_j(2), ')'
+         WRITE (bs_env%unit_nr, '(T2,A,3(2X,I0,1X,A2))') &
+            'RI-RS fit error | J argmax atoms (mu nu P):', &
+            loc_buf_j(4), sym_jmu, loc_buf_j(5), sym_jk, loc_buf_j(6), sym_jP
          WRITE (bs_env%unit_nr, '(A)') ' '
       END IF
 
