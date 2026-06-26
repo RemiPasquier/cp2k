@@ -2621,7 +2621,9 @@ CONTAINS
                           "available for elements up to the fourth row "// &
                           "of the periodic table (see https://doi.org/10.1021/acs.jctc.1c00101). "// &
                           "(2) cc-pVTZ: Optimized grids available for H, C, N, and O atoms "// &
-                          "(see https://doi.org/10.1063/1.5090605).", &
+                          "(see https://doi.org/10.1063/1.5090605). "// &
+                          "(3) RI-RS optimized: grids from this project's offline optimizer, "// &
+                          "staged as ri_rs_grid/<El>_rirs-tzvp.ion.", &
                           usage="GRID_SELECT 1", &
                           default_i_val=1)
       CALL section_add_keyword(section, keyword)
