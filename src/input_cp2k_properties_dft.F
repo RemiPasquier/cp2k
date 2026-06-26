@@ -2659,6 +2659,18 @@ CONTAINS
       CALL section_add_keyword(section, keyword)
       CALL keyword_release(keyword)
 
+      CALL keyword_create(keyword, __LOCATION__, name="PRINT_FIT_ERROR", &
+                          description="If true, print RI-RS fit-error diagnostics after the "// &
+                          "Z_lP solve: the 3-centre reconstruction error e3c = max|int3c_approx "// &
+                          "- int3c_exact| (abs and relative) with its (mu,nu,P) location, the "// &
+                          "Coulomb-norm residual J, and max|Z| (the over-fit indicator). Off by "// &
+                          "default; the extra reconstruction pass costs about one compute_d_lp.", &
+                          usage="PRINT_FIT_ERROR", &
+                          default_l_val=.FALSE., &
+                          lone_keyword_l_val=.TRUE.)
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+
       CALL section_add_subsection(section, subsection)
       CALL section_release(subsection)
 

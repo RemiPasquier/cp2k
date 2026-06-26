@@ -62,6 +62,8 @@ MODULE gw_large_cell_Gamma_ri_rs
         get_W_MIC, multiply_fm_W_MIC_time_with_Minv_Gamma
    USE gw_non_periodic_ri_rs,           ONLY: get_basis_offsets,&
                                               precompute_ri_rs_radii,&
+                                              ri_rs_e3c_accumulate,&
+                                              ri_rs_fit_error_finalize,&
                                               ri_rs_grid_assembler,&
                                               solve_D_lp_distributed
    USE gw_utils,                        ONLY: de_init_bs_env
@@ -496,6 +498,8 @@ CONTAINS
                                                             ri_blk_sizes, row_dist_grid
       REAL(KIND=dp)                                      :: cutoff_ri, cutoff_ri_2, d_sP, dist2_min, &
                                                             r2_threshold, r_c, t1, t2, t3
+      REAL(KIND=dp)                                      :: e3c_abs_max, e3c_vmax, z_abs_max
+      INTEGER, DIMENSION(3)                              :: e3c_atom_max, e3c_idx_max
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:)           :: cutoff_ri_per_atom, cutoff_ri_per_kind, &
                                                             d_vec_local
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: D_local, d_lp_local, phi_local, &
@@ -646,6 +650,14 @@ CONTAINS
          ! phi_local for each atom_P's cutoff sphere is built on the fly via
          ! fill_phi_for_atom — no dense replicated phi_global, no allreduce.
          ! =========================================================================
+         ! RI-RS fit-error accumulators (filled per atom below, reduced + printed after
+         ! the loop). Always initialised; only consumed when PRINT_FIT_ERROR is set.
+         e3c_abs_max = -1.0_dp
+         e3c_vmax = 0.0_dp
+         z_abs_max = 0.0_dp
+         e3c_idx_max(:) = 0
+         e3c_atom_max(:) = 0
+
          DO atom_P = atom_P_start, natom, atom_P_stride
 
             n_loc_ri = ri_blk_sizes(atom_P)
@@ -828,6 +840,16 @@ CONTAINS
             END DO
             !$OMP END PARALLEL DO
 
+            ! RI-RS fit-error diagnostic (opt-in): reconstruct (mu nu|P) from Phi and the
+            ! just-solved Z (= d_lp_local after post-scaling) and accumulate the max error.
+            IF (bs_env%ri_rs%print_fit_error) THEN
+               CALL ri_rs_e3c_accumulate(bs_env, ctx_3c, cell, phi_local, d_lp_local, &
+                                         n_local_grid, n_loc_ri, atom_P, max_ao_size, &
+                                         atom_j_mepos, atom_j_stride, &
+                                         e3c_abs_max, e3c_idx_max, e3c_atom_max, &
+                                         e3c_vmax, z_abs_max)
+            END IF
+
             ! ---------------------------------------------------------------------
             ! H. Scatter Local Solution Back to Global DBCSR Matrix.
             !    Under ScaLAPACK (G>1) the d_lp_local solution is identical on all
@@ -871,6 +893,12 @@ CONTAINS
 
          DEALLOCATE (cutoff_ri_per_atom)
          CALL gw_3c_ctx_release(ctx_3c)
+
+         IF (bs_env%ri_rs%print_fit_error) THEN
+            CALL ri_rs_fit_error_finalize(bs_env, para_env, particle_set, atomic_kind_set, &
+                                          e3c_abs_max, e3c_idx_max, e3c_atom_max, &
+                                          e3c_vmax, z_abs_max)
+         END IF
 
          CALL dbcsr_finalize(mat_Z_lP)
 

@@ -95,7 +95,8 @@ MODULE gw_non_periodic_ri_rs
    CHARACTER(len=*), PARAMETER, PRIVATE :: moduleN = 'gw_non_periodic_ri_rs'
 
    PUBLIC :: gw_calc_non_periodic_ri_rs, ri_rs_grid_assembler, &
-             get_basis_offsets, precompute_ri_rs_radii, solve_D_lp_distributed
+             get_basis_offsets, precompute_ri_rs_radii, solve_D_lp_distributed, &
+             ri_rs_e3c_accumulate, ri_rs_fit_error_finalize
 
 CONTAINS
 
@@ -760,6 +761,8 @@ CONTAINS
                                                             ri_blk_sizes, row_dist_grid
       REAL(KIND=dp)                                      :: cutoff_ri, d_sP, dist, r2_threshold, &
                                                             r_c, t1
+      REAL(KIND=dp)                                      :: e3c_abs_max, e3c_vmax, z_abs_max
+      INTEGER, DIMENSION(3)                              :: e3c_atom_max, e3c_idx_max
       REAL(KIND=dp), ALLOCATABLE                         :: cutoff_ri_per_kind(:)
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:)           :: cutoff_ri_per_atom, d_vec_local
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: D_local, d_lp_local, phi_local, &
@@ -912,6 +915,14 @@ CONTAINS
          ! phi_local for each atom_P's cutoff sphere is built on the fly via
          ! fill_phi_for_atom — no dense replicated phi_global, no allreduce.
          ! =========================================================================
+         ! RI-RS fit-error accumulators (filled per atom below, reduced + printed after
+         ! the loop). Always initialised; only consumed when PRINT_FIT_ERROR is set.
+         e3c_abs_max = -1.0_dp
+         e3c_vmax = 0.0_dp
+         z_abs_max = 0.0_dp
+         e3c_idx_max(:) = 0
+         e3c_atom_max(:) = 0
+
          DO atom_P = atom_P_start, natom, atom_P_stride
 
             n_loc_ri = ri_blk_sizes(atom_P)
@@ -1087,6 +1098,16 @@ CONTAINS
             END DO
             !$OMP END PARALLEL DO
 
+            ! RI-RS fit-error diagnostic (opt-in): reconstruct (mu nu|P) from Phi and the
+            ! just-solved Z (= d_lp_local after post-scaling) and accumulate the max error.
+            IF (bs_env%ri_rs%print_fit_error) THEN
+               CALL ri_rs_e3c_accumulate(bs_env, ctx_3c, cell, phi_local, d_lp_local, &
+                                         n_local_grid, n_loc_ri, atom_P, max_ao_size, &
+                                         atom_j_mepos, atom_j_stride, &
+                                         e3c_abs_max, e3c_idx_max, e3c_atom_max, &
+                                         e3c_vmax, z_abs_max)
+            END IF
+
             ! ---------------------------------------------------------------------
             ! H. Scatter Local Solution Back to Global DBCSR Matrix
             ! local_grid_idx is ascending (built by the ordered scan above), so a
@@ -1131,6 +1152,12 @@ CONTAINS
          DEALLOCATE (cutoff_ri_per_atom)
 
          CALL gw_3c_ctx_release(ctx_3c)
+
+         IF (bs_env%ri_rs%print_fit_error) THEN
+            CALL ri_rs_fit_error_finalize(bs_env, para_env, particle_set, atomic_kind_set, &
+                                          e3c_abs_max, e3c_idx_max, e3c_atom_max, &
+                                          e3c_vmax, z_abs_max)
+         END IF
 
          CALL dbcsr_finalize(mat_Z_lP)
 
@@ -1279,6 +1306,254 @@ CONTAINS
       CALL timestop(handle)
 
    END SUBROUTINE compute_d_lp
+
+! **************************************************************************************************
+!> \brief Accumulate the RI-RS 3-centre reconstruction error e3c for one RI atom P. Rebuilds the
+!>        exact (image-summed) 3c block (mu nu|P) with build_3c_integral_block_ctx, mirroring
+!>        compute_d_lp: the molecular (perd=0) path collapses to the single cell-(0,0,0) block and
+!>        the periodic-Gamma path sums the same (cell_R,cell_S) images, so the "exact" reference is
+!>        exactly the integral the solve targeted. It then forms the reconstruction
+!>        int3c_approx(mu,nu,P) = sum_l Phi_mu(r_l) Phi_nu(r_l) Z_lP and updates, in place, the
+!>        running max |approx - exact| with its global (mu,nu,P) / (atom_j,atom_k,atom_P) location,
+!>        the max |exact| (rel denominator) and the max |Z|. Serial (opt-in diagnostic). MPI: the
+!>        atom_j loop is strided over the subgroup exactly as compute_d_lp, so calling on every
+!>        rank covers each block once; reduce afterwards with ri_rs_fit_error_finalize.
+!> \param bs_env ...
+!> \param ctx shared 3c-integral context (gw_3c_ctx_create)
+!> \param cell ...
+!> \param phi_val Phi_mu(r_l) on the local-sphere grid (n_grid x n_ao_total)
+!> \param Z_lP solved coefficients on the local-sphere grid (n_grid x n_loc_ri)
+!> \param n_grid number of local-sphere grid rows
+!> \param n_loc_ri number of RI functions of atom_P
+!> \param atom_P ...
+!> \param max_ao_size ...
+!> \param atom_j_mepos ...
+!> \param atom_j_stride ...
+!> \param e_abs_max running max abs reconstruction error (INOUT)
+!> \param idx_max global (mu,nu,P) at the running max (INOUT)
+!> \param atom_max (atom_j,atom_k,atom_P) at the running max (INOUT)
+!> \param vmax_loc running max |exact 3c| (INOUT)
+!> \param zmax_loc running max |Z_lP| (INOUT)
+! **************************************************************************************************
+   SUBROUTINE ri_rs_e3c_accumulate(bs_env, ctx, cell, phi_val, Z_lP, n_grid, n_loc_ri, &
+                                   atom_P, max_ao_size, atom_j_mepos, atom_j_stride, &
+                                   e_abs_max, idx_max, atom_max, vmax_loc, zmax_loc)
+
+      TYPE(post_scf_bandstructure_type), POINTER         :: bs_env
+      TYPE(gw_3c_ctx_type), INTENT(IN)                   :: ctx
+      TYPE(cell_type), POINTER                           :: cell
+      REAL(KIND=dp), DIMENSION(:, :), INTENT(IN)         :: phi_val
+      INTEGER, INTENT(IN)                                :: n_grid, n_loc_ri, atom_P, max_ao_size, &
+                                                            atom_j_mepos, atom_j_stride
+      REAL(KIND=dp), INTENT(IN)                          :: Z_lP(n_grid, n_loc_ri)
+      REAL(KIND=dp), INTENT(INOUT)                       :: e_abs_max, vmax_loc, zmax_loc
+      INTEGER, DIMENSION(3), INTENT(INOUT)               :: idx_max, atom_max
+
+      CHARACTER(LEN=*), PARAMETER                        :: routineN = 'ri_rs_e3c_accumulate'
+      INTEGER, PARAMETER                                 :: grid_chunk = 1024
+
+      INTEGER :: atom_j, atom_k, c, handle, ix_hi, ix_lo, ix_R, ix_S, iy_hi, iy_lo, iy_R, iy_S, &
+         iz_hi, iz_lo, iz_R, iz_S, j, jk_idx, jsize, jstart, k, ksize, kstart, l, l0, n_jk, &
+         natom, P_start, ri
+      INTEGER, DIMENSION(3)                              :: cell_R_vec, cell_S_vec
+      LOGICAL                                            :: any_kept, screened
+      REAL(KIND=dp)                                      :: err, exact
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: approx_2d, rho_chunk
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)     :: int_3c_prv, int_3c_sum
+      TYPE(gw_3c_ws_type)                                :: ws
+
+      CALL timeset(routineN, handle)
+
+      natom = SIZE(bs_env%i_ao_start_from_atom)
+      P_start = bs_env%i_RI_start_from_atom(atom_P)
+
+      zmax_loc = MAX(zmax_loc, MAXVAL(ABS(Z_lP(1:n_grid, 1:n_loc_ri))))
+
+      IF (cell%perd(1) == 1) THEN; ix_lo = -1; ix_hi = 1; ELSE; ix_lo = 0; ix_hi = 0; END IF
+      IF (cell%perd(2) == 1) THEN; iy_lo = -1; iy_hi = 1; ELSE; iy_lo = 0; iy_hi = 0; END IF
+      IF (cell%perd(3) == 1) THEN; iz_lo = -1; iz_hi = 1; ELSE; iz_lo = 0; iz_hi = 0; END IF
+
+      CALL gw_3c_ws_create(ws, ctx)
+      ALLOCATE (int_3c_prv(max_ao_size, max_ao_size, n_loc_ri))
+      ALLOCATE (int_3c_sum(max_ao_size, max_ao_size, n_loc_ri))
+      ALLOCATE (approx_2d(max_ao_size*max_ao_size, n_loc_ri))
+      ALLOCATE (rho_chunk(grid_chunk, max_ao_size*max_ao_size))
+
+      DO atom_j = atom_j_mepos + 1, natom, atom_j_stride
+         DO atom_k = 1, natom
+            jstart = bs_env%i_ao_start_from_atom(atom_j)
+            jsize = bs_env%i_ao_end_from_atom(atom_j) - jstart + 1
+            kstart = bs_env%i_ao_start_from_atom(atom_k)
+            ksize = bs_env%i_ao_end_from_atom(atom_k) - kstart + 1
+            n_jk = jsize*ksize
+
+            ! Exact (image-summed) 3c block; screened far-pair triples contribute ~0 both to the
+            ! exact integral and to the reconstruction (their AO tails vanish on atom_P's sphere),
+            ! so skipping them matches compute_d_lp and the offline single-atom reference.
+            int_3c_sum(1:jsize, 1:ksize, 1:n_loc_ri) = 0.0_dp
+            any_kept = .FALSE.
+
+            DO ix_R = ix_lo, ix_hi
+            DO iy_R = iy_lo, iy_hi
+            DO iz_R = iz_lo, iz_hi
+               cell_R_vec = [ix_R, iy_R, iz_R]
+               DO ix_S = ix_lo, ix_hi
+               DO iy_S = iy_lo, iy_hi
+               DO iz_S = iz_lo, iz_hi
+                  cell_S_vec = [ix_S, iy_S, iz_S]
+                  int_3c_prv(1:jsize, 1:ksize, 1:n_loc_ri) = 0.0_dp
+                  CALL build_3c_integral_block_ctx( &
+                     int_3c_prv(1:jsize, 1:ksize, 1:n_loc_ri), ctx, ws, &
+                     atom_j=atom_j, atom_k=atom_k, atom_i=atom_P, &
+                     cell_j=cell_R_vec, cell_k=cell_S_vec, cell_i=[0, 0, 0], &
+                     screened=screened)
+                  IF (screened) CYCLE
+                  any_kept = .TRUE.
+                  int_3c_sum(1:jsize, 1:ksize, 1:n_loc_ri) = &
+                     int_3c_sum(1:jsize, 1:ksize, 1:n_loc_ri) + &
+                     int_3c_prv(1:jsize, 1:ksize, 1:n_loc_ri)
+               END DO
+               END DO
+               END DO
+            END DO
+            END DO
+            END DO
+
+            IF (.NOT. any_kept) CYCLE
+
+            ! int3c_approx((mu nu), P) = sum_l Phi_mu(r_l) Phi_nu(r_l) Z_lP(l, P)  (rho^T Z)
+            approx_2d(1:n_jk, 1:n_loc_ri) = 0.0_dp
+            DO l0 = 1, n_grid, grid_chunk
+               c = MIN(grid_chunk, n_grid - l0 + 1)
+               DO k = 1, ksize
+                  DO j = 1, jsize
+                     jk_idx = (k - 1)*jsize + j
+                     DO l = 1, c
+                        rho_chunk(l, jk_idx) = phi_val(l0 + l - 1, jstart + j - 1)* &
+                                               phi_val(l0 + l - 1, kstart + k - 1)
+                     END DO
+                  END DO
+               END DO
+               CALL dgemm("T", "N", n_jk, n_loc_ri, c, &
+                          1.0_dp, rho_chunk, grid_chunk, &
+                          Z_lP(l0, 1), n_grid, &
+                          1.0_dp, approx_2d, max_ao_size*max_ao_size)
+            END DO
+
+            DO ri = 1, n_loc_ri
+               DO k = 1, ksize
+                  DO j = 1, jsize
+                     jk_idx = (k - 1)*jsize + j
+                     exact = int_3c_sum(j, k, ri)
+                     vmax_loc = MAX(vmax_loc, ABS(exact))
+                     err = ABS(approx_2d(jk_idx, ri) - exact)
+                     IF (err > e_abs_max) THEN
+                        e_abs_max = err
+                        idx_max(1) = jstart + j - 1
+                        idx_max(2) = kstart + k - 1
+                        idx_max(3) = P_start + ri - 1
+                        atom_max(1) = atom_j
+                        atom_max(2) = atom_k
+                        atom_max(3) = atom_P
+                     END IF
+                  END DO
+               END DO
+            END DO
+         END DO
+      END DO
+
+      DEALLOCATE (int_3c_prv, int_3c_sum, approx_2d, rho_chunk)
+      CALL gw_3c_ws_release(ws)
+
+      CALL timestop(handle)
+
+   END SUBROUTINE ri_rs_e3c_accumulate
+
+! **************************************************************************************************
+!> \brief Global MAXLOC reduction + print of the RI-RS fit-error diagnostics accumulated per atom
+!>        by ri_rs_e3c_accumulate. Collective on para_env (every rank calls the reductions/bcast;
+!>        only bs_env%unit_nr > 0 writes). Shared by the molecular and periodic-Gamma RI-RS paths.
+!> \param bs_env ...
+!> \param para_env full RI-RS communicator
+!> \param particle_set ...
+!> \param atomic_kind_set ...
+!> \param e_abs_max per-rank max abs reconstruction error
+!> \param idx_max per-rank global (mu,nu,P) at the max
+!> \param atom_max per-rank (atom_j,atom_k,atom_P) at the max
+!> \param vmax_loc per-rank max |exact 3c|
+!> \param zmax_loc per-rank max |Z_lP|
+! **************************************************************************************************
+   SUBROUTINE ri_rs_fit_error_finalize(bs_env, para_env, particle_set, atomic_kind_set, &
+                                       e_abs_max, idx_max, atom_max, vmax_loc, zmax_loc)
+
+      TYPE(post_scf_bandstructure_type), POINTER         :: bs_env
+      TYPE(mp_para_env_type), POINTER                    :: para_env
+      TYPE(particle_type), DIMENSION(:), POINTER         :: particle_set
+      TYPE(atomic_kind_type), DIMENSION(:), POINTER      :: atomic_kind_set
+      REAL(KIND=dp), INTENT(IN)                          :: e_abs_max, vmax_loc, zmax_loc
+      INTEGER, DIMENSION(3), INTENT(IN)                  :: idx_max, atom_max
+
+      CHARACTER(LEN=*), PARAMETER                        :: routineN = 'ri_rs_fit_error_finalize'
+
+      CHARACTER(LEN=2)                                   :: sym_k, sym_mu, sym_P
+      INTEGER                                            :: handle, ik, src
+      INTEGER, DIMENSION(6)                              :: loc_buf
+      REAL(KIND=dp)                                      :: e_abs_glob, e_rel_glob, v_glob, z_glob
+
+      CALL timeset(routineN, handle)
+
+      e_abs_glob = e_abs_max
+      CALL para_env%max(e_abs_glob)
+      v_glob = vmax_loc
+      CALL para_env%max(v_glob)
+      z_glob = zmax_loc
+      CALL para_env%max(z_glob)
+
+      ! Locate the rank holding the global max abs error (ties -> highest rank), broadcast its
+      ! (mu,nu,P) and (atom_j,atom_k,atom_P). MAX of doubles is exact, so == is safe here.
+      src = -1
+      IF (e_abs_max == e_abs_glob) src = para_env%mepos
+      CALL para_env%max(src)
+
+      loc_buf(1:6) = 0
+      IF (para_env%mepos == src) THEN
+         loc_buf(1:3) = idx_max(1:3)
+         loc_buf(4:6) = atom_max(1:3)
+      END IF
+      CALL para_env%bcast(loc_buf, src)
+
+      e_rel_glob = e_abs_glob/MAX(v_glob, 1.0E-300_dp)
+
+      sym_mu = "??"; sym_k = "??"; sym_P = "??"
+      IF (loc_buf(4) >= 1) THEN
+         ik = particle_set(loc_buf(4))%atomic_kind%kind_number
+         sym_mu = atomic_kind_set(ik)%element_symbol
+      END IF
+      IF (loc_buf(5) >= 1) THEN
+         ik = particle_set(loc_buf(5))%atomic_kind%kind_number
+         sym_k = atomic_kind_set(ik)%element_symbol
+      END IF
+      IF (loc_buf(6) >= 1) THEN
+         ik = particle_set(loc_buf(6))%atomic_kind%kind_number
+         sym_P = atomic_kind_set(ik)%element_symbol
+      END IF
+
+      IF (bs_env%unit_nr > 0) THEN
+         WRITE (bs_env%unit_nr, '(A)') ' '
+         WRITE (bs_env%unit_nr, '(T2,A,ES11.3,A,I0,A,I0,A,I0,A)') &
+            'RI-RS fit error | e3c Linf abs = ', e_abs_glob, &
+            '  at (mu=', loc_buf(1), ' nu=', loc_buf(2), ' P=', loc_buf(3), ')'
+         WRITE (bs_env%unit_nr, '(T2,A,ES11.3,A,ES11.3)') &
+            'RI-RS fit error | e3c Linf rel = ', e_rel_glob, ' ; max|Z| = ', z_glob
+         WRITE (bs_env%unit_nr, '(T2,A,3(2X,I0,1X,A2))') &
+            'RI-RS fit error | argmax atoms (mu nu P):', &
+            loc_buf(4), sym_mu, loc_buf(5), sym_k, loc_buf(6), sym_P
+         WRITE (bs_env%unit_nr, '(A)') ' '
+      END IF
+
+      CALL timestop(handle)
+
+   END SUBROUTINE ri_rs_fit_error_finalize
 
 ! **************************************************************************************************
 !> \brief Distributed pdpotrf/pdpotrs solve of D x = b for one atom of the

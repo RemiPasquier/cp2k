@@ -78,6 +78,10 @@ MODULE post_scf_bandstructure_types
       ! the subgroup so wall time matches the BLAS path.
       INTEGER                                          :: n_procs_per_atom_z_lp = 1
 
+      ! Print RI-RS fit-error diagnostics (e3c reconstruction error / Coulomb-norm J)
+      ! after the Z_lP solve. Off by default; the extra pass costs ~one compute_d_lp.
+      LOGICAL                                          :: print_fit_error = .FALSE.
+
       ! Data types for building grid points
       TYPE(rirs_grid_type), ALLOCATABLE                :: grid_cache(:)
 
