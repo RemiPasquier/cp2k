@@ -106,7 +106,7 @@ MODULE gw_non_periodic_ri_rs
 
    PUBLIC :: gw_calc_non_periodic_ri_rs, ri_rs_grid_assembler, &
              get_basis_offsets, precompute_ri_rs_radii, solve_D_lp_distributed, &
-             ri_rs_e3c_accumulate, ri_rs_fit_error_finalize
+             ri_rs_e3c_accumulate, ri_rs_fit_error_finalize, ri_rs_j_full_compute
 
 CONTAINS
 
@@ -766,6 +766,7 @@ CONTAINS
          l, loc_idx, loc_ptr, max_ao_size, max_loc_ri, my_group, n_ao_total, n_grid_total, &
          n_groups, n_loc_ri, n_local_grid, n_procs_per_atom, natom, nkind, num_grid_chunks, &
          P_loop_atom, r_end, r_start, source_atom
+      INTEGER                                            :: j_full_info, n_ao_pair_total, naux_total
       INTEGER, ALLOCATABLE, DIMENSION(:)                 :: local_grid_idx, row_offset
       INTEGER, DIMENSION(:), POINTER                     :: col_dist_phi, col_dist_ri, r_blk_sizes, &
                                                             ri_blk_sizes, row_dist_grid
@@ -775,10 +776,14 @@ CONTAINS
       INTEGER, DIMENSION(3)                              :: e3c_atom_max, e3c_idx_max
       REAL(KIND=dp)                                      :: j_sq_sum, j_pair_max
       INTEGER, DIMENSION(3)                              :: j_atom_max, j_idx_max
+      LOGICAL                                            :: j_full_ok
+      REAL(KIND=dp)                                      :: j_full_sq_sum, j_full_pair_max
+      INTEGER, DIMENSION(3)                              :: j_full_atom_max, j_full_idx_max
       REAL(KIND=dp), ALLOCATABLE                         :: cutoff_ri_per_kind(:)
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:)           :: cutoff_ri_per_atom, d_vec_local
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: D_local, d_lp_local, phi_local, &
                                                             sphere_grid, Z_blk
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: R_full
       REAL(KIND=dp), DIMENSION(3)                        :: pos_P
       TYPE(atomic_kind_type), DIMENSION(:), POINTER      :: atomic_kind_set
       TYPE(cell_type), POINTER                           :: cell
@@ -831,6 +836,8 @@ CONTAINS
 
       natom = SIZE(bs_env%i_RI_start_from_atom)
       n_ao_total = bs_env%i_ao_end_from_atom(natom)
+      naux_total = bs_env%i_RI_end_from_atom(natom)
+      n_ao_pair_total = n_ao_total*n_ao_total
       n_grid_total = SIZE(ri_rs_grid_points, 2)
 
       ! =========================================================================
@@ -938,6 +945,17 @@ CONTAINS
          j_pair_max = -1.0_dp
          j_idx_max(:) = 0
          j_atom_max(:) = 0
+         j_full_ok = .FALSE.
+         j_full_info = 0
+         j_full_sq_sum = 0.0_dp
+         j_full_pair_max = -1.0_dp
+         j_full_idx_max(:) = 0
+         j_full_atom_max(:) = 0
+
+         IF (bs_env%ri_rs%print_fit_error) THEN
+            ALLOCATE (R_full(n_ao_pair_total, naux_total))
+            R_full(:, :) = 0.0_dp
+         END IF
 
          DO atom_P = atom_P_start, natom, atom_P_stride
 
@@ -1122,7 +1140,8 @@ CONTAINS
                                          atom_j_mepos, atom_j_stride, &
                                          e3c_abs_max, e3c_idx_max, e3c_atom_max, &
                                          e3c_vmax, z_abs_max, &
-                                         j_sq_sum, j_pair_max, j_idx_max, j_atom_max)
+                                         j_sq_sum, j_pair_max, j_idx_max, j_atom_max, &
+                                         R_full, n_ao_total)
             END IF
 
             ! ---------------------------------------------------------------------
@@ -1166,6 +1185,15 @@ CONTAINS
 
          END DO
 
+         IF (bs_env%ri_rs%print_fit_error) THEN
+            CALL para_env%sum(R_full)
+            ! NOTE: J_full costs O(naux^2) memory and O(naux^3) Cholesky -- diagnostic only.
+            CALL ri_rs_j_full_compute(bs_env, ctx_3c, para_env, particle_set, R_full, &
+                                      n_ao_total, j_full_ok, j_full_info, &
+                                      j_full_sq_sum, j_full_pair_max, &
+                                      j_full_idx_max, j_full_atom_max)
+         END IF
+
          DEALLOCATE (cutoff_ri_per_atom)
 
          CALL gw_3c_ctx_release(ctx_3c)
@@ -1174,7 +1202,10 @@ CONTAINS
             CALL ri_rs_fit_error_finalize(bs_env, para_env, particle_set, atomic_kind_set, &
                                           e3c_abs_max, e3c_idx_max, e3c_atom_max, &
                                           e3c_vmax, z_abs_max, &
-                                          j_sq_sum, j_pair_max, j_idx_max, j_atom_max)
+                                          j_sq_sum, j_pair_max, j_idx_max, j_atom_max, &
+                                          j_full_ok, j_full_info, j_full_sq_sum, &
+                                          j_full_pair_max, j_full_idx_max, j_full_atom_max)
+            DEALLOCATE (R_full)
          END IF
 
          CALL dbcsr_finalize(mat_Z_lP)
@@ -1362,7 +1393,8 @@ CONTAINS
    SUBROUTINE ri_rs_e3c_accumulate(bs_env, ctx, cell, phi_val, Z_lP, n_grid, n_loc_ri, &
                                    atom_P, max_ao_size, atom_j_mepos, atom_j_stride, &
                                    e_abs_max, idx_max, atom_max, vmax_loc, zmax_loc, &
-                                   j_sq_sum, j_pair_max, j_idx_max, j_atom_max)
+                                   j_sq_sum, j_pair_max, j_idx_max, j_atom_max, &
+                                   R_full, n_ao_total)
 
       TYPE(post_scf_bandstructure_type), POINTER         :: bs_env
       TYPE(gw_3c_ctx_type), INTENT(IN)                   :: ctx
@@ -1375,6 +1407,8 @@ CONTAINS
       INTEGER, DIMENSION(3), INTENT(INOUT)               :: idx_max, atom_max
       REAL(KIND=dp), INTENT(INOUT)                       :: j_sq_sum, j_pair_max
       INTEGER, DIMENSION(3), INTENT(INOUT)               :: j_idx_max, j_atom_max
+      REAL(KIND=dp), DIMENSION(:, :), INTENT(INOUT)      :: R_full
+      INTEGER, INTENT(IN)                                :: n_ao_total
 
       CHARACTER(LEN=*), PARAMETER                        :: routineN = 'ri_rs_e3c_accumulate'
       INTEGER, PARAMETER                                 :: grid_chunk = 1024
@@ -1384,11 +1418,12 @@ CONTAINS
          natom, P_start, ri
       INTEGER :: egfp, egfq, ikind_ri, info_solve, info_vpp, j_rec, jk, k_rec, maxl_ri, ncop, &
          ncoq, nset_ri, nsgf_ri, pset, qset, sgfp, sgfq
+      INTEGER                                            :: jk_global
       INTEGER, DIMENSION(3)                              :: cell_R_vec, cell_S_vec
       INTEGER, DIMENSION(:), POINTER                     :: lmax_ri, lmin_ri, npgf_ri, nsgf_set_ri
       INTEGER, DIMENSION(:, :), POINTER                  :: first_sgf_ri
       LOGICAL                                            :: any_kept, j_ok, screened
-      REAL(KIND=dp)                                      :: err, exact, j_p
+      REAL(KIND=dp)                                      :: err, exact, j_p, resid
       REAL(KIND=dp), DIMENSION(3)                        :: pos_P_2c
       REAL(KIND=dp), DIMENSION(:, :), POINTER            :: rpgf_ri, sphi_ri, zet_ri
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: approx_2d, R_blk, rho_chunk, V_PP, &
@@ -1551,7 +1586,10 @@ CONTAINS
                         atom_max(2) = atom_k
                         atom_max(3) = atom_P
                      END IF
-                     IF (j_ok) R_blk(ri, jk_idx) = approx_2d(jk_idx, ri) - exact
+                     resid = approx_2d(jk_idx, ri) - exact
+                     jk_global = (kstart + k - 2)*n_ao_total + jstart + j - 1
+                     R_full(jk_global, P_start + ri - 1) = resid
+                     IF (j_ok) R_blk(ri, jk_idx) = resid
                   END DO
                END DO
             END DO
@@ -1593,6 +1631,212 @@ CONTAINS
    END SUBROUTINE ri_rs_e3c_accumulate
 
 ! **************************************************************************************************
+!> \brief Build the full bare-Coulomb auxiliary metric and evaluate R_full^T V_full^-1 R_full.
+!>        Diagnostic only: replicated on rank 0 after R_full has been summed over para_env.
+!> \param bs_env ...
+!> \param ctx shared 3c-integral context (gw_3c_ctx_create)
+!> \param para_env full RI-RS communicator
+!> \param particle_set ...
+!> \param R_full global residual rows (mu,nu), columns auxiliary P
+!> \param n_ao_total total number of AO functions
+!> \param j_full_ok true if the full Cholesky/solve succeeded on rank 0
+!> \param j_full_info dpotrf/dpotrs info, or negative for a basis-size mismatch
+!> \param j_sq_sum rank-local contribution to the full J sum (rank 0 only)
+!> \param j_pair_max rank-local max over AO pairs (rank 0 only)
+!> \param j_idx_max global (mu,nu,0) at the full-J pair max
+!> \param j_atom_max atom indices (atom_mu,atom_nu,0) at the full-J pair max
+! **************************************************************************************************
+   SUBROUTINE ri_rs_j_full_compute(bs_env, ctx, para_env, particle_set, R_full, n_ao_total, &
+                                   j_full_ok, j_full_info, j_sq_sum, j_pair_max, &
+                                   j_idx_max, j_atom_max)
+
+      TYPE(post_scf_bandstructure_type), POINTER         :: bs_env
+      TYPE(gw_3c_ctx_type), INTENT(IN)                   :: ctx
+      TYPE(mp_para_env_type), POINTER                    :: para_env
+      TYPE(particle_type), DIMENSION(:), POINTER         :: particle_set
+      REAL(KIND=dp), DIMENSION(:, :), INTENT(IN)         :: R_full
+      INTEGER, INTENT(IN)                                :: n_ao_total
+      LOGICAL, INTENT(OUT)                               :: j_full_ok
+      INTEGER, INTENT(OUT)                               :: j_full_info
+      REAL(KIND=dp), INTENT(OUT)                         :: j_sq_sum, j_pair_max
+      INTEGER, DIMENSION(3), INTENT(OUT)                 :: j_idx_max, j_atom_max
+
+      CHARACTER(LEN=*), PARAMETER                        :: routineN = 'ri_rs_j_full_compute'
+
+      INTEGER :: atom_mu, atom_P, atom_Q, col_aux, egfp, egfq, handle, ikind_P, ikind_Q, &
+         info_solve, maxl_P, maxl_Q, maxl_pair, mu_idx, natom, naux_total, ncoq, ncop, &
+         n_ao_pair_total, nu_idx, p_nri, p_start, pset, q_nri, q_start, qset, row_pair, sgfp, sgfq
+      INTEGER, ALLOCATABLE, DIMENSION(:)                 :: ao_atom
+      INTEGER, DIMENSION(:), POINTER                     :: lmax_P, lmax_Q, lmin_P, lmin_Q, &
+                                                            npgf_P, npgf_Q, nsgf_set_P, nsgf_set_Q
+      INTEGER, DIMENSION(:, :), POINTER                  :: first_sgf_P, first_sgf_Q
+      REAL(KIND=dp)                                      :: j_p
+      REAL(KIND=dp), DIMENSION(3)                        :: pos_P, pos_Q
+      REAL(KIND=dp), DIMENSION(:, :), POINTER            :: rpgf_P, rpgf_Q, sphi_P, sphi_Q, &
+                                                            zet_P, zet_Q
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: V_full, work2c, Y_full
+      TYPE(cp_libint_t)                                  :: lib2c
+      TYPE(libint_potential_type)                        :: v_coulomb
+
+      CALL timeset(routineN, handle)
+
+      j_full_ok = .FALSE.
+      j_full_info = 0
+      j_sq_sum = 0.0_dp
+      j_pair_max = -1.0_dp
+      j_idx_max(:) = 0
+      j_atom_max(:) = 0
+
+      IF (para_env%mepos /= 0) THEN
+         CALL timestop(handle)
+         RETURN
+      END IF
+
+      natom = SIZE(bs_env%i_RI_start_from_atom)
+      naux_total = SIZE(R_full, 2)
+      n_ao_pair_total = SIZE(R_full, 1)
+
+      ALLOCATE (ao_atom(n_ao_total))
+      DO atom_mu = 1, natom
+         ao_atom(bs_env%i_ao_start_from_atom(atom_mu):bs_env%i_ao_end_from_atom(atom_mu)) = atom_mu
+      END DO
+
+      ALLOCATE (V_full(naux_total, naux_total))
+      V_full(:, :) = 0.0_dp
+      v_coulomb%potential_type = do_potential_coulomb
+
+      DO atom_P = 1, natom
+         p_start = bs_env%i_RI_start_from_atom(atom_P)
+         p_nri = bs_env%i_RI_end_from_atom(atom_P) - p_start + 1
+         ikind_P = ctx%kind_of(atom_P)
+         CALL get_gto_basis_set(ctx%basis_i(ikind_P)%gto_basis_set, lmax=lmax_P, lmin=lmin_P, &
+                                npgf=npgf_P, nset=pset, zet=zet_P, first_sgf=first_sgf_P, &
+                                nsgf_set=nsgf_set_P, pgf_radius=rpgf_P, sphi=sphi_P, &
+                                maxl=maxl_P, nsgf=col_aux)
+         IF (col_aux /= p_nri) THEN
+            j_full_info = -1
+            IF (bs_env%unit_nr > 0) THEN
+               WRITE (bs_env%unit_nr, '(T2,A,I0,A,I0)') &
+                  'RI-RS fit error | WARNING: J_full skipped; RI basis size mismatch on atom ', &
+                  atom_P, ' nsgf=', col_aux
+            END IF
+            DEALLOCATE (V_full, ao_atom)
+            CALL timestop(handle)
+            RETURN
+         END IF
+
+         pos_P(1:3) = particle_set(atom_P)%r(1:3)
+
+         DO atom_Q = 1, natom
+            q_start = bs_env%i_RI_start_from_atom(atom_Q)
+            q_nri = bs_env%i_RI_end_from_atom(atom_Q) - q_start + 1
+            ikind_Q = ctx%kind_of(atom_Q)
+            CALL get_gto_basis_set(ctx%basis_i(ikind_Q)%gto_basis_set, lmax=lmax_Q, lmin=lmin_Q, &
+                                   npgf=npgf_Q, nset=qset, zet=zet_Q, first_sgf=first_sgf_Q, &
+                                   nsgf_set=nsgf_set_Q, pgf_radius=rpgf_Q, sphi=sphi_Q, &
+                                   maxl=maxl_Q, nsgf=col_aux)
+            IF (col_aux /= q_nri) THEN
+               j_full_info = -1
+               IF (bs_env%unit_nr > 0) THEN
+                  WRITE (bs_env%unit_nr, '(T2,A,I0,A,I0)') &
+                     'RI-RS fit error | WARNING: J_full skipped; RI basis size mismatch on atom ', &
+                     atom_Q, ' nsgf=', col_aux
+               END IF
+               DEALLOCATE (V_full, ao_atom)
+               CALL timestop(handle)
+               RETURN
+            END IF
+
+            pos_Q(1:3) = particle_set(atom_Q)%r(1:3)
+            maxl_pair = MAX(maxl_P, maxl_Q)
+            CALL init_md_ftable(2*maxl_pair)
+            CALL cp_libint_init_2eri(lib2c, maxl_pair)
+            CALL cp_libint_set_contrdepth(lib2c, 1)
+
+            DO pset = 1, SIZE(lmax_P)
+               ncop = npgf_P(pset)*ncoset(lmax_P(pset))
+               sgfp = first_sgf_P(1, pset)
+               egfp = sgfp + nsgf_set_P(pset) - 1
+               DO qset = 1, SIZE(lmax_Q)
+                  ncoq = npgf_Q(qset)*ncoset(lmax_Q(qset))
+                  sgfq = first_sgf_Q(1, qset)
+                  egfq = sgfq + nsgf_set_Q(qset) - 1
+                  ALLOCATE (work2c(ncop, ncoq))
+                  work2c(:, :) = 0.0_dp
+                  CALL eri_2center(work2c, lmin_P(pset), lmax_P(pset), npgf_P(pset), &
+                                   zet_P(:, pset), rpgf_P(:, pset), pos_P, &
+                                   lmin_Q(qset), lmax_Q(qset), npgf_Q(qset), &
+                                   zet_Q(:, qset), rpgf_Q(:, qset), pos_Q, &
+                                   0.0_dp, lib2c, v_coulomb)
+                  CALL ab_contract(V_full(p_start + sgfp - 1:p_start + egfp - 1, &
+                                          q_start + sgfq - 1:q_start + egfq - 1), work2c, &
+                                   sphi_P(:, sgfp:), sphi_Q(:, sgfq:), &
+                                   ncop, ncoq, nsgf_set_P(pset), nsgf_set_Q(qset))
+                  DEALLOCATE (work2c)
+               END DO
+            END DO
+
+            CALL cp_libint_cleanup_2eri(lib2c)
+         END DO
+      END DO
+
+      CALL dpotrf('L', naux_total, V_full, naux_total, j_full_info)
+      IF (j_full_info /= 0) THEN
+         IF (bs_env%unit_nr > 0) THEN
+            WRITE (bs_env%unit_nr, '(T2,A,I0)') &
+               'RI-RS fit error | WARNING: J_full skipped; dpotrf info = ', j_full_info
+         END IF
+         DEALLOCATE (V_full, ao_atom)
+         CALL timestop(handle)
+         RETURN
+      END IF
+
+      ALLOCATE (Y_full(naux_total, n_ao_pair_total))
+      DO row_pair = 1, n_ao_pair_total
+         Y_full(1:naux_total, row_pair) = R_full(row_pair, 1:naux_total)
+      END DO
+
+      CALL dpotrs('L', naux_total, n_ao_pair_total, V_full, naux_total, &
+                  Y_full, naux_total, info_solve)
+      IF (info_solve /= 0) THEN
+         j_full_info = info_solve
+         IF (bs_env%unit_nr > 0) THEN
+            WRITE (bs_env%unit_nr, '(T2,A,I0)') &
+               'RI-RS fit error | WARNING: J_full skipped; dpotrs info = ', info_solve
+         END IF
+         DEALLOCATE (V_full, Y_full, ao_atom)
+         CALL timestop(handle)
+         RETURN
+      END IF
+
+      DO row_pair = 1, n_ao_pair_total
+         j_p = 0.0_dp
+         DO col_aux = 1, naux_total
+            j_p = j_p + R_full(row_pair, col_aux)*Y_full(col_aux, row_pair)
+         END DO
+         j_sq_sum = j_sq_sum + j_p
+         IF (j_p > j_pair_max) THEN
+            j_pair_max = j_p
+            mu_idx = MOD(row_pair - 1, n_ao_total) + 1
+            nu_idx = (row_pair - 1)/n_ao_total + 1
+            j_idx_max(1) = mu_idx
+            j_idx_max(2) = nu_idx
+            j_idx_max(3) = 0
+            j_atom_max(1) = ao_atom(mu_idx)
+            j_atom_max(2) = ao_atom(nu_idx)
+            j_atom_max(3) = 0
+         END IF
+      END DO
+
+      j_full_ok = .TRUE.
+
+      DEALLOCATE (V_full, Y_full, ao_atom)
+
+      CALL timestop(handle)
+
+   END SUBROUTINE ri_rs_j_full_compute
+
+! **************************************************************************************************
 !> \brief Global MAXLOC reduction + print of the RI-RS fit-error diagnostics accumulated per atom
 !>        by ri_rs_e3c_accumulate. Collective on para_env (every rank calls the reductions/bcast;
 !>        only bs_env%unit_nr > 0 writes). Shared by the molecular and periodic-Gamma RI-RS paths.
@@ -1609,10 +1853,18 @@ CONTAINS
 !> \param j_pair_max per-rank max over pairs of J_pair (squared)
 !> \param j_idx_max per-rank global (mu,nu,P_start) at the J_pair max
 !> \param j_atom_max per-rank (atom_j,atom_k,atom_P) at the J_pair max
+!> \param j_full_ok true on the rank that successfully computed the full-J diagnostic
+!> \param j_full_info dpotrf/dpotrs status, or negative for setup failure
+!> \param j_full_sq_sum rank-local full-J sum (rank 0 only)
+!> \param j_full_pair_max rank-local full-J max over AO pairs (rank 0 only)
+!> \param j_full_idx_max global (mu,nu,0) at the full-J pair max
+!> \param j_full_atom_max atom indices (atom_mu,atom_nu,0) at the full-J pair max
 ! **************************************************************************************************
    SUBROUTINE ri_rs_fit_error_finalize(bs_env, para_env, particle_set, atomic_kind_set, &
                                        e_abs_max, idx_max, atom_max, vmax_loc, zmax_loc, &
-                                       j_sq_sum, j_pair_max, j_idx_max, j_atom_max)
+                                       j_sq_sum, j_pair_max, j_idx_max, j_atom_max, &
+                                       j_full_ok, j_full_info, j_full_sq_sum, j_full_pair_max, &
+                                       j_full_idx_max, j_full_atom_max)
 
       TYPE(post_scf_bandstructure_type), POINTER         :: bs_env
       TYPE(mp_para_env_type), POINTER                    :: para_env
@@ -1622,14 +1874,23 @@ CONTAINS
       INTEGER, DIMENSION(3), INTENT(IN)                  :: idx_max, atom_max
       REAL(KIND=dp), INTENT(IN)                          :: j_sq_sum, j_pair_max
       INTEGER, DIMENSION(3), INTENT(IN)                  :: j_idx_max, j_atom_max
+      LOGICAL, INTENT(IN)                                :: j_full_ok
+      INTEGER, INTENT(IN)                                :: j_full_info
+      REAL(KIND=dp), INTENT(IN)                          :: j_full_sq_sum, j_full_pair_max
+      INTEGER, DIMENSION(3), INTENT(IN)                  :: j_full_idx_max, j_full_atom_max
 
       CHARACTER(LEN=*), PARAMETER                        :: routineN = 'ri_rs_fit_error_finalize'
 
-      CHARACTER(LEN=2)                                   :: sym_jk, sym_jmu, sym_jP, sym_k, sym_mu, &
-                                                            sym_P
-      INTEGER                                            :: handle, ik, src, src_j
+      CHARACTER(LEN=2)                                   :: sym_fmu, sym_fk, sym_jk, sym_jmu, sym_jP, &
+                                                            sym_k, sym_mu, sym_P
+      INTEGER                                            :: handle, ik, j_full_info_glob, j_full_ok_i, src, src_j, &
+                                                            src_j_full
+      INTEGER, DIMENSION(4)                              :: loc_buf_j_full
       INTEGER, DIMENSION(6)                              :: loc_buf, loc_buf_j
+      LOGICAL                                            :: j_full_ok_glob
       REAL(KIND=dp)                                      :: e_abs_glob, e_rel_glob, j_pair_glob, &
+                                                            j_full_pair_glob, j_full_sq_glob, &
+                                                            sqrt_j_full_glob, sqrt_j_full_pair_glob, &
                                                             j_sq_glob, sqrt_j_glob, &
                                                             sqrt_jpair_glob, v_glob, z_glob
 
@@ -1673,6 +1934,32 @@ CONTAINS
       END IF
       CALL para_env%bcast(loc_buf_j, src_j)
 
+      j_full_info_glob = ABS(j_full_info)
+      CALL para_env%max(j_full_info_glob)
+      j_full_sq_glob = j_full_sq_sum
+      CALL para_env%sum(j_full_sq_glob)
+      sqrt_j_full_glob = SQRT(MAX(j_full_sq_glob, 0.0_dp))
+      j_full_pair_glob = j_full_pair_max
+      CALL para_env%max(j_full_pair_glob)
+      sqrt_j_full_pair_glob = SQRT(MAX(j_full_pair_glob, 0.0_dp))
+      j_full_ok_i = 0
+      IF (j_full_ok) j_full_ok_i = 1
+      CALL para_env%max(j_full_ok_i)
+      j_full_ok_glob = (j_full_info_glob == 0 .AND. j_full_pair_glob >= 0.0_dp .AND. &
+                        j_full_ok_i == 1)
+
+      loc_buf_j_full(1:4) = 0
+      IF (j_full_ok_glob) THEN
+         src_j_full = -1
+         IF (j_full_pair_max == j_full_pair_glob) src_j_full = para_env%mepos
+         CALL para_env%max(src_j_full)
+         IF (para_env%mepos == src_j_full) THEN
+            loc_buf_j_full(1:2) = j_full_idx_max(1:2)
+            loc_buf_j_full(3:4) = j_full_atom_max(1:2)
+         END IF
+         CALL para_env%bcast(loc_buf_j_full, src_j_full)
+      END IF
+
       e_rel_glob = e_abs_glob/MAX(v_glob, 1.0E-300_dp)
 
       sym_mu = "??"; sym_k = "??"; sym_P = "??"
@@ -1703,6 +1990,16 @@ CONTAINS
          sym_jP = atomic_kind_set(ik)%element_symbol
       END IF
 
+      sym_fmu = "??"; sym_fk = "??"
+      IF (loc_buf_j_full(3) >= 1) THEN
+         ik = particle_set(loc_buf_j_full(3))%atomic_kind%kind_number
+         sym_fmu = atomic_kind_set(ik)%element_symbol
+      END IF
+      IF (loc_buf_j_full(4) >= 1) THEN
+         ik = particle_set(loc_buf_j_full(4))%atomic_kind%kind_number
+         sym_fk = atomic_kind_set(ik)%element_symbol
+      END IF
+
       IF (bs_env%unit_nr > 0) THEN
          WRITE (bs_env%unit_nr, '(A)') ' '
          WRITE (bs_env%unit_nr, '(T2,A,ES11.3,A,I0,A,I0,A,I0,A)') &
@@ -1720,6 +2017,18 @@ CONTAINS
          WRITE (bs_env%unit_nr, '(T2,A,3(2X,I0,1X,A2))') &
             'RI-RS fit error | J argmax atoms (mu nu P):', &
             loc_buf_j(4), sym_jmu, loc_buf_j(5), sym_jk, loc_buf_j(6), sym_jP
+         IF (j_full_ok_glob) THEN
+            WRITE (bs_env%unit_nr, '(T2,A,ES11.3,A,ES11.3,A,I0,A,I0,A)') &
+               'RI-RS fit error | J_full sqrt(tr R^T V^-1 R) = ', sqrt_j_full_glob, &
+               ' ; per-pair max = ', sqrt_j_full_pair_glob, &
+               ' at (mu=', loc_buf_j_full(1), ' nu=', loc_buf_j_full(2), ')'
+            WRITE (bs_env%unit_nr, '(T2,A,2(2X,I0,1X,A2))') &
+               'RI-RS fit error | J_full argmax atoms (mu nu):', &
+               loc_buf_j_full(3), sym_fmu, loc_buf_j_full(4), sym_fk
+         ELSE
+            WRITE (bs_env%unit_nr, '(T2,A,I0)') &
+               'RI-RS fit error | J_full skipped; info = ', j_full_info_glob
+         END IF
          WRITE (bs_env%unit_nr, '(A)') ' '
       END IF
 

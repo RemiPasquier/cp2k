@@ -64,6 +64,7 @@ MODULE gw_large_cell_Gamma_ri_rs
                                               precompute_ri_rs_radii,&
                                               ri_rs_e3c_accumulate,&
                                               ri_rs_fit_error_finalize,&
+                                              ri_rs_j_full_compute,&
                                               ri_rs_grid_assembler,&
                                               solve_D_lp_distributed
    USE gw_utils,                        ONLY: de_init_bs_env
@@ -493,6 +494,7 @@ CONTAINS
          l, loc_idx, loc_ptr, max_ao_size, max_loc_ri, my_group, n_ao_total, n_grid_total, &
          n_groups, n_loc_ri, n_local_grid, n_procs_per_atom, natom, nkind, num_grid_chunks, &
          P_loop_atom, r_end, r_start, source_atom
+      INTEGER                                            :: j_full_info, n_ao_pair_total, naux_total
       INTEGER, ALLOCATABLE, DIMENSION(:)                 :: local_grid_idx, row_offset
       INTEGER, DIMENSION(:), POINTER                     :: col_dist_phi, col_dist_ri, r_blk_sizes, &
                                                             ri_blk_sizes, row_dist_grid
@@ -502,10 +504,14 @@ CONTAINS
       INTEGER, DIMENSION(3)                              :: e3c_atom_max, e3c_idx_max
       REAL(KIND=dp)                                      :: j_sq_sum, j_pair_max
       INTEGER, DIMENSION(3)                              :: j_atom_max, j_idx_max
+      LOGICAL                                            :: j_full_ok
+      REAL(KIND=dp)                                      :: j_full_sq_sum, j_full_pair_max
+      INTEGER, DIMENSION(3)                              :: j_full_atom_max, j_full_idx_max
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:)           :: cutoff_ri_per_atom, cutoff_ri_per_kind, &
                                                             d_vec_local
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: D_local, d_lp_local, phi_local, &
                                                             sphere_grid, Z_blk
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: R_full
       REAL(KIND=dp), DIMENSION(3)                        :: dist_vec_raw, pos_P
       TYPE(atomic_kind_type), DIMENSION(:), POINTER      :: atomic_kind_set
       TYPE(cell_type), POINTER                           :: cell
@@ -558,6 +564,8 @@ CONTAINS
 
       natom = SIZE(bs_env%i_RI_start_from_atom)
       n_ao_total = bs_env%i_ao_end_from_atom(natom)
+      naux_total = bs_env%i_RI_end_from_atom(natom)
+      n_ao_pair_total = n_ao_total*n_ao_total
       n_grid_total = SIZE(ri_rs_grid_points, 2)
 
       ! =========================================================================
@@ -663,6 +671,17 @@ CONTAINS
          j_pair_max = -1.0_dp
          j_idx_max(:) = 0
          j_atom_max(:) = 0
+         j_full_ok = .FALSE.
+         j_full_info = 0
+         j_full_sq_sum = 0.0_dp
+         j_full_pair_max = -1.0_dp
+         j_full_idx_max(:) = 0
+         j_full_atom_max(:) = 0
+
+         IF (bs_env%ri_rs%print_fit_error) THEN
+            ALLOCATE (R_full(n_ao_pair_total, naux_total))
+            R_full(:, :) = 0.0_dp
+         END IF
 
          DO atom_P = atom_P_start, natom, atom_P_stride
 
@@ -854,7 +873,8 @@ CONTAINS
                                          atom_j_mepos, atom_j_stride, &
                                          e3c_abs_max, e3c_idx_max, e3c_atom_max, &
                                          e3c_vmax, z_abs_max, &
-                                         j_sq_sum, j_pair_max, j_idx_max, j_atom_max)
+                                         j_sq_sum, j_pair_max, j_idx_max, j_atom_max, &
+                                         R_full, n_ao_total)
             END IF
 
             ! ---------------------------------------------------------------------
@@ -898,6 +918,15 @@ CONTAINS
 
          END DO
 
+         IF (bs_env%ri_rs%print_fit_error) THEN
+            CALL para_env%sum(R_full)
+            ! NOTE: J_full costs O(naux^2) memory and O(naux^3) Cholesky -- diagnostic only.
+            CALL ri_rs_j_full_compute(bs_env, ctx_3c, para_env, particle_set, R_full, &
+                                      n_ao_total, j_full_ok, j_full_info, &
+                                      j_full_sq_sum, j_full_pair_max, &
+                                      j_full_idx_max, j_full_atom_max)
+         END IF
+
          DEALLOCATE (cutoff_ri_per_atom)
          CALL gw_3c_ctx_release(ctx_3c)
 
@@ -905,7 +934,10 @@ CONTAINS
             CALL ri_rs_fit_error_finalize(bs_env, para_env, particle_set, atomic_kind_set, &
                                           e3c_abs_max, e3c_idx_max, e3c_atom_max, &
                                           e3c_vmax, z_abs_max, &
-                                          j_sq_sum, j_pair_max, j_idx_max, j_atom_max)
+                                          j_sq_sum, j_pair_max, j_idx_max, j_atom_max, &
+                                          j_full_ok, j_full_info, j_full_sq_sum, &
+                                          j_full_pair_max, j_full_idx_max, j_full_atom_max)
+            DEALLOCATE (R_full)
          END IF
 
          CALL dbcsr_finalize(mat_Z_lP)
