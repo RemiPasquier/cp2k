@@ -104,11 +104,130 @@ MODULE gw_non_periodic_ri_rs
 
    CHARACTER(len=*), PARAMETER, PRIVATE :: moduleN = 'gw_non_periodic_ri_rs'
 
+   INTEGER, PARAMETER, PRIVATE :: ri_rs_topk_size = 10, &
+                                  ri_rs_topk_nlists = 3, &
+                                  ri_rs_topk_e3c = 1, &
+                                  ri_rs_topk_mbare = 2, &
+                                  ri_rs_topk_mtrunc = 3
+
+   TYPE :: ri_rs_topk_type
+      REAL(KIND=dp) :: val(ri_rs_topk_size, ri_rs_topk_nlists) = -1.0_dp
+      INTEGER       :: idx(3, ri_rs_topk_size, ri_rs_topk_nlists) = 0
+      INTEGER       :: atom(3, ri_rs_topk_size, ri_rs_topk_nlists) = 0
+   END TYPE ri_rs_topk_type
+
    PUBLIC :: gw_calc_non_periodic_ri_rs, ri_rs_grid_assembler, &
              get_basis_offsets, precompute_ri_rs_radii, solve_D_lp_distributed, &
-             ri_rs_e3c_accumulate, ri_rs_fit_error_finalize, ri_rs_j_full_compute
+             ri_rs_e3c_accumulate, ri_rs_fit_error_finalize, ri_rs_j_full_compute, &
+             ri_rs_topk_type
 
 CONTAINS
+
+! **************************************************************************************************
+!> \brief Insert one absolute value into a fixed-size per-rank top-k diagnostic list.
+! **************************************************************************************************
+   SUBROUTINE ri_rs_topk_insert(topk, list_id, val, i1, i2, i3, a1, a2, a3)
+
+      TYPE(ri_rs_topk_type), INTENT(INOUT)               :: topk
+      INTEGER, INTENT(IN)                                :: list_id, i1, i2, i3, a1, a2, a3
+      REAL(KIND=dp), INTENT(IN)                          :: val
+
+      INTEGER                                            :: k, min_slot
+      REAL(KIND=dp)                                      :: abs_val, min_val
+
+      IF (list_id < 1 .OR. list_id > ri_rs_topk_nlists) RETURN
+
+      abs_val = ABS(val)
+      IF (abs_val <= 0.0_dp) RETURN
+
+      min_slot = 1
+      min_val = topk%val(1, list_id)
+      DO k = 2, ri_rs_topk_size
+         IF (topk%val(k, list_id) < min_val) THEN
+            min_slot = k
+            min_val = topk%val(k, list_id)
+         END IF
+      END DO
+
+      IF (abs_val > min_val) THEN
+         topk%val(min_slot, list_id) = abs_val
+         topk%idx(:, min_slot, list_id) = [i1, i2, i3]
+         topk%atom(:, min_slot, list_id) = [a1, a2, a3]
+      END IF
+
+   END SUBROUTINE ri_rs_topk_insert
+
+! **************************************************************************************************
+!> \brief Reduce one fixed-size local top-k list into global rank order and print it.
+! **************************************************************************************************
+   SUBROUTINE ri_rs_topk_reduce_print(bs_env, para_env, particle_set, atomic_kind_set, topk, &
+                                      list_id, title, third_label)
+
+      TYPE(post_scf_bandstructure_type), POINTER         :: bs_env
+      TYPE(mp_para_env_type), POINTER                    :: para_env
+      TYPE(particle_type), DIMENSION(:), POINTER         :: particle_set
+      TYPE(atomic_kind_type), DIMENSION(:), POINTER      :: atomic_kind_set
+      TYPE(ri_rs_topk_type), INTENT(IN)                  :: topk
+      INTEGER, INTENT(IN)                                :: list_id
+      CHARACTER(LEN=*), INTENT(IN)                       :: title, third_label
+
+      CHARACTER(LEN=2)                                   :: sym(3)
+      INTEGER                                            :: ik, k, m, src, slot
+      INTEGER, DIMENSION(6)                              :: loc_buf
+      REAL(KIND=dp)                                      :: global_val, local_val, val_buf
+      TYPE(ri_rs_topk_type)                              :: topk_work
+
+      topk_work = topk
+
+      IF (bs_env%unit_nr > 0) THEN
+         WRITE (bs_env%unit_nr, '(T2,A)') TRIM(title)
+      END IF
+
+      DO m = 1, ri_rs_topk_size
+         local_val = MAXVAL(topk_work%val(:, list_id))
+         global_val = local_val
+         CALL para_env%max(global_val)
+         IF (global_val <= 0.0_dp) EXIT
+
+         src = -1
+         IF (local_val == global_val) src = para_env%mepos
+         CALL para_env%max(src)
+
+         loc_buf(:) = 0
+         val_buf = 0.0_dp
+         IF (para_env%mepos == src) THEN
+            slot = 1
+            DO k = 1, ri_rs_topk_size
+               IF (topk_work%val(k, list_id) == global_val) THEN
+                  slot = k
+                  EXIT
+               END IF
+            END DO
+            val_buf = topk_work%val(slot, list_id)
+            loc_buf(1:3) = topk_work%idx(:, slot, list_id)
+            loc_buf(4:6) = topk_work%atom(:, slot, list_id)
+            topk_work%val(slot, list_id) = -1.0_dp
+         END IF
+         CALL para_env%bcast(val_buf, src)
+         CALL para_env%bcast(loc_buf, src)
+
+         sym(:) = "??"
+         DO k = 1, 3
+            IF (loc_buf(k + 3) >= 1) THEN
+               ik = particle_set(loc_buf(k + 3))%atomic_kind%kind_number
+               sym(k) = atomic_kind_set(ik)%element_symbol
+            END IF
+         END DO
+
+         IF (bs_env%unit_nr > 0) THEN
+            WRITE (bs_env%unit_nr, '(T4,A,I0,A,ES11.3,A,I0,A,I0,A,A,A,I0,A,3(2X,I0,1X,A2))') &
+               '#', m, ' val=', val_buf, ' (mu=', loc_buf(1), ' nu=', loc_buf(2), &
+               ' ', TRIM(third_label), '=', loc_buf(3), ') atoms', &
+               loc_buf(4), sym(1), loc_buf(5), sym(2), loc_buf(6), sym(3)
+         END IF
+      END DO
+
+   END SUBROUTINE ri_rs_topk_reduce_print
 
 ! **************************************************************************************************
 !> \brief GW calculation using RI-RS formalism for molecules
@@ -427,7 +546,11 @@ CONTAINS
       ELSE IF (bs_env%ri_rs%grid_select == 2) THEN
          suffix = "_cc-pvtz-rs.ion"
       ELSE IF (bs_env%ri_rs%grid_select == 3) THEN
-         suffix = "_rirs-tzvp.ion"
+         IF (LEN_TRIM(bs_env%ri_rs%grid_file_suffix) > 0) THEN
+            suffix = TRIM(bs_env%ri_rs%grid_file_suffix)
+         ELSE
+            suffix = "_rirs-tzvp.ion"
+         END IF
       ELSE
          CPABORT("Unknown grid_select (1=def2, 2=cc-pVTZ, 3=RI-RS).")
       END IF
@@ -779,6 +902,7 @@ CONTAINS
       LOGICAL                                            :: j_full_ok
       REAL(KIND=dp)                                      :: j_full_sq_sum, j_full_pair_max
       INTEGER, DIMENSION(3)                              :: j_full_atom_max, j_full_idx_max
+      TYPE(ri_rs_topk_type)                              :: fit_topk
       REAL(KIND=dp), ALLOCATABLE                         :: cutoff_ri_per_kind(:)
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:)           :: cutoff_ri_per_atom, d_vec_local
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: D_local, d_lp_local, phi_local, &
@@ -1141,7 +1265,7 @@ CONTAINS
                                          e3c_abs_max, e3c_idx_max, e3c_atom_max, &
                                          e3c_vmax, z_abs_max, &
                                          j_sq_sum, j_pair_max, j_idx_max, j_atom_max, &
-                                         R_full, n_ao_total)
+                                         R_full, n_ao_total, fit_topk)
             END IF
 
             ! ---------------------------------------------------------------------
@@ -1204,7 +1328,8 @@ CONTAINS
                                           e3c_vmax, z_abs_max, &
                                           j_sq_sum, j_pair_max, j_idx_max, j_atom_max, &
                                           j_full_ok, j_full_info, j_full_sq_sum, &
-                                          j_full_pair_max, j_full_idx_max, j_full_atom_max)
+                                          j_full_pair_max, j_full_idx_max, j_full_atom_max, &
+                                          fit_topk)
             DEALLOCATE (R_full)
          END IF
 
@@ -1394,7 +1519,7 @@ CONTAINS
                                    atom_P, max_ao_size, atom_j_mepos, atom_j_stride, &
                                    e_abs_max, idx_max, atom_max, vmax_loc, zmax_loc, &
                                    j_sq_sum, j_pair_max, j_idx_max, j_atom_max, &
-                                   R_full, n_ao_total)
+                                   R_full, n_ao_total, fit_topk)
 
       TYPE(post_scf_bandstructure_type), POINTER         :: bs_env
       TYPE(gw_3c_ctx_type), INTENT(IN)                   :: ctx
@@ -1409,6 +1534,7 @@ CONTAINS
       INTEGER, DIMENSION(3), INTENT(INOUT)               :: j_idx_max, j_atom_max
       REAL(KIND=dp), DIMENSION(:, :), INTENT(INOUT)      :: R_full
       INTEGER, INTENT(IN)                                :: n_ao_total
+      TYPE(ri_rs_topk_type), INTENT(INOUT)               :: fit_topk
 
       CHARACTER(LEN=*), PARAMETER                        :: routineN = 'ri_rs_e3c_accumulate'
       INTEGER, PARAMETER                                 :: grid_chunk = 1024
@@ -1416,22 +1542,23 @@ CONTAINS
       INTEGER :: atom_j, atom_k, c, handle, ix_hi, ix_lo, ix_R, ix_S, iy_hi, iy_lo, iy_R, iy_S, &
          iz_hi, iz_lo, iz_R, iz_S, j, jk_idx, jsize, jstart, k, ksize, kstart, l, l0, n_jk, &
          natom, P_start, ri
-      INTEGER :: egfp, egfq, ikind_ri, info_solve, info_vpp, j_rec, jk, k_rec, maxl_ri, ncop, &
-         ncoq, nset_ri, nsgf_ri, pset, qset, sgfp, sgfq
+      INTEGER :: egfp, egfq, ikind_ri, info_solve, info_solve_trunc, info_vpp, info_vpp_trunc, &
+         j_rec, jk, k_rec, maxl_ri, ncop, ncoq, nset_ri, nsgf_ri, pset, qset, sgfp, sgfq
       INTEGER                                            :: jk_global
       INTEGER, DIMENSION(3)                              :: cell_R_vec, cell_S_vec
       INTEGER, DIMENSION(:), POINTER                     :: lmax_ri, lmin_ri, npgf_ri, nsgf_set_ri
       INTEGER, DIMENSION(:, :), POINTER                  :: first_sgf_ri
-      LOGICAL                                            :: any_kept, j_ok, screened
+      LOGICAL                                            :: any_kept, have_metric, j_ok, screened, trunc_ok
       REAL(KIND=dp)                                      :: err, exact, j_p, resid
       REAL(KIND=dp), DIMENSION(3)                        :: pos_P_2c
       REAL(KIND=dp), DIMENSION(:, :), POINTER            :: rpgf_ri, sphi_ri, zet_ri
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: approx_2d, R_blk, rho_chunk, V_PP, &
-                                                            V_PP_chol, work2c, Y_blk
+                                                            V_PP_chol, V_PP_trunc_chol, work2c, &
+                                                            Y_blk, Y_trunc
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)     :: int_3c_prv, int_3c_sum
       TYPE(cp_libint_t)                                  :: lib2c
       TYPE(gw_3c_ws_type)                                :: ws
-      TYPE(libint_potential_type)                        :: v_coulomb
+      TYPE(libint_potential_type)                        :: v_coulomb, v_trunc
 
       CALL timeset(routineN, handle)
 
@@ -1467,8 +1594,10 @@ CONTAINS
                              nsgf_set=nsgf_set_ri, pgf_radius=rpgf_ri, sphi=sphi_ri, &
                              maxl=maxl_ri, nsgf=nsgf_ri)
 
-      j_ok = (nsgf_ri == n_loc_ri)
-      IF (j_ok) THEN
+      have_metric = (nsgf_ri == n_loc_ri)
+      j_ok = have_metric
+      trunc_ok = have_metric
+      IF (have_metric) THEN
          pos_P_2c(1:3) = ctx%particle_set(atom_P)%r(1:3)
          CALL init_md_ftable(2*maxl_ri)
          v_coulomb%potential_type = do_potential_coulomb
@@ -1505,8 +1634,44 @@ CONTAINS
          CALL dpotrf('L', n_loc_ri, V_PP_chol, n_loc_ri, info_vpp)
          IF (info_vpp /= 0) j_ok = .FALSE.
          DEALLOCATE (V_PP)
-         ALLOCATE (R_blk(n_loc_ri, max_ao_size*max_ao_size))
-         ALLOCATE (Y_blk(n_loc_ri, max_ao_size*max_ao_size))
+         IF (j_ok) ALLOCATE (Y_blk(n_loc_ri, max_ao_size*max_ao_size))
+
+         v_trunc = bs_env%ri_metric
+         CALL cp_libint_init_2eri(lib2c, maxl_ri)
+         CALL cp_libint_set_contrdepth(lib2c, 1)
+
+         ALLOCATE (V_PP(n_loc_ri, n_loc_ri))
+         V_PP(:, :) = 0.0_dp
+         DO pset = 1, nset_ri
+            ncop = npgf_ri(pset)*ncoset(lmax_ri(pset))
+            sgfp = first_sgf_ri(1, pset)
+            egfp = sgfp + nsgf_set_ri(pset) - 1
+            DO qset = 1, nset_ri
+               ncoq = npgf_ri(qset)*ncoset(lmax_ri(qset))
+               sgfq = first_sgf_ri(1, qset)
+               egfq = sgfq + nsgf_set_ri(qset) - 1
+               ALLOCATE (work2c(ncop, ncoq))
+               work2c(:, :) = 0.0_dp
+               CALL eri_2center(work2c, lmin_ri(pset), lmax_ri(pset), npgf_ri(pset), &
+                                zet_ri(:, pset), rpgf_ri(:, pset), pos_P_2c, &
+                                lmin_ri(qset), lmax_ri(qset), npgf_ri(qset), &
+                                zet_ri(:, qset), rpgf_ri(:, qset), pos_P_2c, &
+                                0.0_dp, lib2c, v_trunc)
+               CALL ab_contract(V_PP(sgfp:egfp, sgfq:egfq), work2c, &
+                                sphi_ri(:, sgfp:), sphi_ri(:, sgfq:), &
+                                ncop, ncoq, nsgf_set_ri(pset), nsgf_set_ri(qset))
+               DEALLOCATE (work2c)
+            END DO
+         END DO
+         CALL cp_libint_cleanup_2eri(lib2c)
+
+         ALLOCATE (V_PP_trunc_chol(n_loc_ri, n_loc_ri))
+         V_PP_trunc_chol(:, :) = V_PP(:, :)
+         CALL dpotrf('L', n_loc_ri, V_PP_trunc_chol, n_loc_ri, info_vpp_trunc)
+         IF (info_vpp_trunc /= 0) trunc_ok = .FALSE.
+         DEALLOCATE (V_PP)
+         IF (trunc_ok) ALLOCATE (Y_trunc(n_loc_ri, max_ao_size*max_ao_size))
+         IF (j_ok .OR. trunc_ok) ALLOCATE (R_blk(n_loc_ri, max_ao_size*max_ao_size))
       END IF
 
       DO atom_j = atom_j_mepos + 1, natom, atom_j_stride
@@ -1587,9 +1752,12 @@ CONTAINS
                         atom_max(3) = atom_P
                      END IF
                      resid = approx_2d(jk_idx, ri) - exact
+                     CALL ri_rs_topk_insert(fit_topk, ri_rs_topk_e3c, resid, &
+                                            jstart + j - 1, kstart + k - 1, &
+                                            P_start + ri - 1, atom_j, atom_k, atom_P)
                      jk_global = (kstart + k - 2)*n_ao_total + jstart + j - 1
                      R_full(jk_global, P_start + ri - 1) = resid
-                     IF (j_ok) R_blk(ri, jk_idx) = resid
+                     IF (j_ok .OR. trunc_ok) R_blk(ri, jk_idx) = resid
                   END DO
                END DO
             END DO
@@ -1599,15 +1767,20 @@ CONTAINS
                Y_blk(1:n_loc_ri, 1:n_jk) = R_blk(1:n_loc_ri, 1:n_jk)
                CALL dpotrs('L', n_loc_ri, n_jk, V_PP_chol, n_loc_ri, Y_blk, n_loc_ri, info_solve)
                DO jk = 1, n_jk
+                  k_rec = (jk - 1)/jsize + 1
+                  j_rec = jk - (k_rec - 1)*jsize
                   j_p = 0.0_dp
                   DO ri = 1, n_loc_ri
                      j_p = j_p + R_blk(ri, jk)*Y_blk(ri, jk)
+                     IF (info_solve == 0) THEN
+                        CALL ri_rs_topk_insert(fit_topk, ri_rs_topk_mbare, Y_blk(ri, jk), &
+                                               jstart + j_rec - 1, kstart + k_rec - 1, &
+                                               P_start + ri - 1, atom_j, atom_k, atom_P)
+                     END IF
                   END DO
                   j_sq_sum = j_sq_sum + j_p
                   IF (j_p > j_pair_max) THEN
                      j_pair_max = j_p
-                     k_rec = (jk - 1)/jsize + 1
-                     j_rec = jk - (k_rec - 1)*jsize
                      j_idx_max(1) = jstart + j_rec - 1
                      j_idx_max(2) = kstart + k_rec - 1
                      j_idx_max(3) = P_start
@@ -1617,13 +1790,31 @@ CONTAINS
                   END IF
                END DO
             END IF
+            IF (trunc_ok) THEN
+               Y_trunc(1:n_loc_ri, 1:n_jk) = R_blk(1:n_loc_ri, 1:n_jk)
+               CALL dpotrs('L', n_loc_ri, n_jk, V_PP_trunc_chol, n_loc_ri, &
+                           Y_trunc, n_loc_ri, info_solve_trunc)
+               IF (info_solve_trunc == 0) THEN
+                  DO jk = 1, n_jk
+                     k_rec = (jk - 1)/jsize + 1
+                     j_rec = jk - (k_rec - 1)*jsize
+                     DO ri = 1, n_loc_ri
+                        CALL ri_rs_topk_insert(fit_topk, ri_rs_topk_mtrunc, Y_trunc(ri, jk), &
+                                               jstart + j_rec - 1, kstart + k_rec - 1, &
+                                               P_start + ri - 1, atom_j, atom_k, atom_P)
+                     END DO
+                  END DO
+               END IF
+            END IF
          END DO
       END DO
 
       DEALLOCATE (int_3c_prv, int_3c_sum, approx_2d, rho_chunk)
       IF (ALLOCATED(V_PP_chol)) DEALLOCATE (V_PP_chol)
+      IF (ALLOCATED(V_PP_trunc_chol)) DEALLOCATE (V_PP_trunc_chol)
       IF (ALLOCATED(R_blk)) DEALLOCATE (R_blk)
       IF (ALLOCATED(Y_blk)) DEALLOCATE (Y_blk)
+      IF (ALLOCATED(Y_trunc)) DEALLOCATE (Y_trunc)
       CALL gw_3c_ws_release(ws)
 
       CALL timestop(handle)
@@ -1864,7 +2055,7 @@ CONTAINS
                                        e_abs_max, idx_max, atom_max, vmax_loc, zmax_loc, &
                                        j_sq_sum, j_pair_max, j_idx_max, j_atom_max, &
                                        j_full_ok, j_full_info, j_full_sq_sum, j_full_pair_max, &
-                                       j_full_idx_max, j_full_atom_max)
+                                       j_full_idx_max, j_full_atom_max, fit_topk)
 
       TYPE(post_scf_bandstructure_type), POINTER         :: bs_env
       TYPE(mp_para_env_type), POINTER                    :: para_env
@@ -1878,6 +2069,7 @@ CONTAINS
       INTEGER, INTENT(IN)                                :: j_full_info
       REAL(KIND=dp), INTENT(IN)                          :: j_full_sq_sum, j_full_pair_max
       INTEGER, DIMENSION(3), INTENT(IN)                  :: j_full_idx_max, j_full_atom_max
+      TYPE(ri_rs_topk_type), INTENT(IN)                  :: fit_topk
 
       CHARACTER(LEN=*), PARAMETER                        :: routineN = 'ri_rs_fit_error_finalize'
 
@@ -2029,6 +2221,19 @@ CONTAINS
             WRITE (bs_env%unit_nr, '(T2,A,I0)') &
                'RI-RS fit error | J_full skipped; info = ', j_full_info_glob
          END IF
+      END IF
+
+      CALL ri_rs_topk_reduce_print(bs_env, para_env, particle_set, atomic_kind_set, fit_topk, &
+                                   ri_rs_topk_e3c, &
+                                   'RI-RS fit error | top-10 (mu nu|P) abs:', 'P')
+      CALL ri_rs_topk_reduce_print(bs_env, para_env, particle_set, atomic_kind_set, fit_topk, &
+                                   ri_rs_topk_mbare, &
+                                   'RI-RS fit error | top-10 3c.Minv bare (mu nu|Q):', 'Q')
+      CALL ri_rs_topk_reduce_print(bs_env, para_env, particle_set, atomic_kind_set, fit_topk, &
+                                   ri_rs_topk_mtrunc, &
+                                   'RI-RS fit error | top-10 3c.Minv trunc (mu nu|Q):', 'Q')
+
+      IF (bs_env%unit_nr > 0) THEN
          WRITE (bs_env%unit_nr, '(A)') ' '
       END IF
 

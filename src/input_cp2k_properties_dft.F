@@ -2629,6 +2629,14 @@ CONTAINS
       CALL section_add_keyword(section, keyword)
       CALL keyword_release(keyword)
 
+      CALL keyword_create(keyword, __LOCATION__, name="GRID_FILE_SUFFIX", &
+                          description="Overrides the default per-element RI-RS grid file "// &
+                          "suffix for GRID_SELECT 3; grids are read as ri_rs_grid/<El><suffix>.", &
+                          usage="GRID_FILE_SUFFIX _rirs-tzvp.ion", &
+                          default_lc_val="")
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+
       CALL keyword_create(keyword, __LOCATION__, name="CUTOFF_RADIUS_RI_RS", &
                           description="Override (in Angstrom) of the truncated-Coulomb cutoff radius Rc used "// &
                           "to size the per-atom RI-RS integration domain "// &

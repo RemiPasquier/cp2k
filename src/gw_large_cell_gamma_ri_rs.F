@@ -65,6 +65,7 @@ MODULE gw_large_cell_Gamma_ri_rs
                                               ri_rs_e3c_accumulate,&
                                               ri_rs_fit_error_finalize,&
                                               ri_rs_j_full_compute,&
+                                              ri_rs_topk_type,&
                                               ri_rs_grid_assembler,&
                                               solve_D_lp_distributed
    USE gw_utils,                        ONLY: de_init_bs_env
@@ -507,6 +508,7 @@ CONTAINS
       LOGICAL                                            :: j_full_ok
       REAL(KIND=dp)                                      :: j_full_sq_sum, j_full_pair_max
       INTEGER, DIMENSION(3)                              :: j_full_atom_max, j_full_idx_max
+      TYPE(ri_rs_topk_type)                              :: fit_topk
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:)           :: cutoff_ri_per_atom, cutoff_ri_per_kind, &
                                                             d_vec_local
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: D_local, d_lp_local, phi_local, &
@@ -874,7 +876,7 @@ CONTAINS
                                          e3c_abs_max, e3c_idx_max, e3c_atom_max, &
                                          e3c_vmax, z_abs_max, &
                                          j_sq_sum, j_pair_max, j_idx_max, j_atom_max, &
-                                         R_full, n_ao_total)
+                                         R_full, n_ao_total, fit_topk)
             END IF
 
             ! ---------------------------------------------------------------------
@@ -936,7 +938,8 @@ CONTAINS
                                           e3c_vmax, z_abs_max, &
                                           j_sq_sum, j_pair_max, j_idx_max, j_atom_max, &
                                           j_full_ok, j_full_info, j_full_sq_sum, &
-                                          j_full_pair_max, j_full_idx_max, j_full_atom_max)
+                                          j_full_pair_max, j_full_idx_max, j_full_atom_max, &
+                                          fit_topk)
             DEALLOCATE (R_full)
          END IF
 
