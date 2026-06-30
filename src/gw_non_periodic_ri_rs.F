@@ -109,6 +109,7 @@ MODULE gw_non_periodic_ri_rs
                                   ri_rs_topk_e3c = 1, &
                                   ri_rs_topk_mbare = 2, &
                                   ri_rs_topk_mtrunc = 3
+   REAL(KIND=dp), PARAMETER, PRIVATE :: ri_rs_j_full_max_bytes = 2.0E9_dp  ! ~2 GB/rank cap for replicated R_full
 
    TYPE :: ri_rs_topk_type
       REAL(KIND=dp) :: val(ri_rs_topk_size, ri_rs_topk_nlists) = -1.0_dp
@@ -899,7 +900,7 @@ CONTAINS
       INTEGER, DIMENSION(3)                              :: e3c_atom_max, e3c_idx_max
       REAL(KIND=dp)                                      :: j_sq_sum, j_pair_max
       INTEGER, DIMENSION(3)                              :: j_atom_max, j_idx_max
-      LOGICAL                                            :: j_full_ok
+      LOGICAL                                            :: do_j_full, j_full_ok
       REAL(KIND=dp)                                      :: j_full_sq_sum, j_full_pair_max
       INTEGER, DIMENSION(3)                              :: j_full_atom_max, j_full_idx_max
       TYPE(ri_rs_topk_type)                              :: fit_topk
@@ -1076,9 +1077,23 @@ CONTAINS
          j_full_idx_max(:) = 0
          j_full_atom_max(:) = 0
 
+         do_j_full = bs_env%ri_rs%print_fit_error .AND. &
+                     (REAL(n_ao_pair_total, dp)*REAL(naux_total, dp)*8.0_dp <= ri_rs_j_full_max_bytes)
          IF (bs_env%ri_rs%print_fit_error) THEN
-            ALLOCATE (R_full(n_ao_pair_total, naux_total))
-            R_full(:, :) = 0.0_dp
+            j_full_ok = .FALSE.
+            j_full_info = 0
+            IF (do_j_full) THEN
+               ALLOCATE (R_full(n_ao_pair_total, naux_total))
+               R_full(:, :) = 0.0_dp
+            ELSE
+               ALLOCATE (R_full(1, 1))
+               IF (bs_env%unit_nr > 0) THEN
+                  WRITE (bs_env%unit_nr, '(T2,A,F0.1,A)') &
+                     'RI-RS fit error | J_full skipped: replicated R_full ', &
+                     REAL(n_ao_pair_total, dp)*REAL(naux_total, dp)*8.0_dp/1.0E9_dp, &
+                     ' GB/rank > cap; e3c + top-10 still computed.'
+               END IF
+            END IF
          END IF
 
          DO atom_P = atom_P_start, natom, atom_P_stride
@@ -1265,7 +1280,7 @@ CONTAINS
                                          e3c_abs_max, e3c_idx_max, e3c_atom_max, &
                                          e3c_vmax, z_abs_max, &
                                          j_sq_sum, j_pair_max, j_idx_max, j_atom_max, &
-                                         R_full, n_ao_total, fit_topk)
+                                         R_full, n_ao_total, fit_topk, do_j_full)
             END IF
 
             ! ---------------------------------------------------------------------
@@ -1309,7 +1324,7 @@ CONTAINS
 
          END DO
 
-         IF (bs_env%ri_rs%print_fit_error) THEN
+         IF (bs_env%ri_rs%print_fit_error .AND. do_j_full) THEN
             CALL para_env%sum(R_full)
             ! NOTE: J_full costs O(naux^2) memory and O(naux^3) Cholesky -- diagnostic only.
             CALL ri_rs_j_full_compute(bs_env, ctx_3c, para_env, particle_set, R_full, &
@@ -1519,7 +1534,7 @@ CONTAINS
                                    atom_P, max_ao_size, atom_j_mepos, atom_j_stride, &
                                    e_abs_max, idx_max, atom_max, vmax_loc, zmax_loc, &
                                    j_sq_sum, j_pair_max, j_idx_max, j_atom_max, &
-                                   R_full, n_ao_total, fit_topk)
+                                   R_full, n_ao_total, fit_topk, do_j_full)
 
       TYPE(post_scf_bandstructure_type), POINTER         :: bs_env
       TYPE(gw_3c_ctx_type), INTENT(IN)                   :: ctx
@@ -1535,6 +1550,7 @@ CONTAINS
       REAL(KIND=dp), DIMENSION(:, :), INTENT(INOUT)      :: R_full
       INTEGER, INTENT(IN)                                :: n_ao_total
       TYPE(ri_rs_topk_type), INTENT(INOUT)               :: fit_topk
+      LOGICAL, INTENT(IN)                                :: do_j_full
 
       CHARACTER(LEN=*), PARAMETER                        :: routineN = 'ri_rs_e3c_accumulate'
       INTEGER, PARAMETER                                 :: grid_chunk = 1024
@@ -1755,8 +1771,10 @@ CONTAINS
                      CALL ri_rs_topk_insert(fit_topk, ri_rs_topk_e3c, resid, &
                                             jstart + j - 1, kstart + k - 1, &
                                             P_start + ri - 1, atom_j, atom_k, atom_P)
-                     jk_global = (kstart + k - 2)*n_ao_total + jstart + j - 1
-                     R_full(jk_global, P_start + ri - 1) = resid
+                     IF (do_j_full) THEN
+                        jk_global = (kstart + k - 2)*n_ao_total + jstart + j - 1
+                        R_full(jk_global, P_start + ri - 1) = resid
+                     END IF
                      IF (j_ok .OR. trunc_ok) R_blk(ri, jk_idx) = resid
                   END DO
                END DO

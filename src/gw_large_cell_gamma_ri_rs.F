@@ -505,7 +505,7 @@ CONTAINS
       INTEGER, DIMENSION(3)                              :: e3c_atom_max, e3c_idx_max
       REAL(KIND=dp)                                      :: j_sq_sum, j_pair_max
       INTEGER, DIMENSION(3)                              :: j_atom_max, j_idx_max
-      LOGICAL                                            :: j_full_ok
+      LOGICAL                                            :: do_j_full, j_full_ok
       REAL(KIND=dp)                                      :: j_full_sq_sum, j_full_pair_max
       INTEGER, DIMENSION(3)                              :: j_full_atom_max, j_full_idx_max
       TYPE(ri_rs_topk_type)                              :: fit_topk
@@ -680,9 +680,24 @@ CONTAINS
          j_full_idx_max(:) = 0
          j_full_atom_max(:) = 0
 
+         ! Same 2 GB/rank cap as ri_rs_j_full_max_bytes in gw_non_periodic_ri_rs.
+         do_j_full = bs_env%ri_rs%print_fit_error .AND. &
+                     (REAL(n_ao_pair_total, dp)*REAL(naux_total, dp)*8.0_dp <= 2.0E9_dp)
          IF (bs_env%ri_rs%print_fit_error) THEN
-            ALLOCATE (R_full(n_ao_pair_total, naux_total))
-            R_full(:, :) = 0.0_dp
+            j_full_ok = .FALSE.
+            j_full_info = 0
+            IF (do_j_full) THEN
+               ALLOCATE (R_full(n_ao_pair_total, naux_total))
+               R_full(:, :) = 0.0_dp
+            ELSE
+               ALLOCATE (R_full(1, 1))
+               IF (bs_env%unit_nr > 0) THEN
+                  WRITE (bs_env%unit_nr, '(T2,A,F0.1,A)') &
+                     'RI-RS fit error | J_full skipped: replicated R_full ', &
+                     REAL(n_ao_pair_total, dp)*REAL(naux_total, dp)*8.0_dp/1.0E9_dp, &
+                     ' GB/rank > cap; e3c + top-10 still computed.'
+               END IF
+            END IF
          END IF
 
          DO atom_P = atom_P_start, natom, atom_P_stride
@@ -876,7 +891,7 @@ CONTAINS
                                          e3c_abs_max, e3c_idx_max, e3c_atom_max, &
                                          e3c_vmax, z_abs_max, &
                                          j_sq_sum, j_pair_max, j_idx_max, j_atom_max, &
-                                         R_full, n_ao_total, fit_topk)
+                                         R_full, n_ao_total, fit_topk, do_j_full)
             END IF
 
             ! ---------------------------------------------------------------------
@@ -920,7 +935,7 @@ CONTAINS
 
          END DO
 
-         IF (bs_env%ri_rs%print_fit_error) THEN
+         IF (bs_env%ri_rs%print_fit_error .AND. do_j_full) THEN
             CALL para_env%sum(R_full)
             ! NOTE: J_full costs O(naux^2) memory and O(naux^3) Cholesky -- diagnostic only.
             CALL ri_rs_j_full_compute(bs_env, ctx_3c, para_env, particle_set, R_full, &
