@@ -105,14 +105,19 @@ MODULE gw_non_periodic_ri_rs
    CHARACTER(len=*), PARAMETER, PRIVATE :: moduleN = 'gw_non_periodic_ri_rs'
 
    INTEGER, PARAMETER, PRIVATE :: ri_rs_topk_size = 30, &
-                                  ri_rs_topk_nlists = 3, &
+                                  ri_rs_topk_nlists = 4, &
                                   ri_rs_topk_e3c = 1, &
                                   ri_rs_topk_mbare = 2, &
-                                  ri_rs_topk_mtrunc = 3
+                                  ri_rs_topk_mtrunc = 3, &
+                                  ri_rs_topk_e3crel = 4
    REAL(KIND=dp), PARAMETER, PRIVATE :: ri_rs_j_full_max_bytes = 2.0E9_dp  ! ~2 GB/rank cap for replicated R_full
+   ! Absolute |exact| floor, not a running/global max|v| scale: this single streaming pass over
+   ! integrals ranks before the global max is known.
+   REAL(KIND=dp), PARAMETER, PRIVATE :: ri_rs_relfloor = 1.0E-2_dp
 
    TYPE :: ri_rs_topk_type
       REAL(KIND=dp) :: val(ri_rs_topk_size, ri_rs_topk_nlists) = -1.0_dp
+      REAL(KIND=dp) :: vref(ri_rs_topk_size, ri_rs_topk_nlists) = 0.0_dp
       INTEGER       :: idx(3, ri_rs_topk_size, ri_rs_topk_nlists) = 0
       INTEGER       :: atom(3, ri_rs_topk_size, ri_rs_topk_nlists) = 0
    END TYPE ri_rs_topk_type
@@ -127,11 +132,11 @@ CONTAINS
 ! **************************************************************************************************
 !> \brief Insert one absolute value into a fixed-size per-rank top-k diagnostic list.
 ! **************************************************************************************************
-   SUBROUTINE ri_rs_topk_insert(topk, list_id, val, i1, i2, i3, a1, a2, a3)
+   SUBROUTINE ri_rs_topk_insert(topk, list_id, val, vref, i1, i2, i3, a1, a2, a3)
 
       TYPE(ri_rs_topk_type), INTENT(INOUT)               :: topk
       INTEGER, INTENT(IN)                                :: list_id, i1, i2, i3, a1, a2, a3
-      REAL(KIND=dp), INTENT(IN)                          :: val
+      REAL(KIND=dp), INTENT(IN)                          :: val, vref
 
       INTEGER                                            :: k, min_slot
       REAL(KIND=dp)                                      :: abs_val, min_val
@@ -152,6 +157,7 @@ CONTAINS
 
       IF (abs_val > min_val) THEN
          topk%val(min_slot, list_id) = abs_val
+         topk%vref(min_slot, list_id) = vref
          topk%idx(:, min_slot, list_id) = [i1, i2, i3]
          topk%atom(:, min_slot, list_id) = [a1, a2, a3]
       END IF
@@ -194,7 +200,7 @@ CONTAINS
       CHARACTER(LEN=2)                                   :: sym(3)
       INTEGER                                            :: ik, k, m, src, slot
       INTEGER, DIMENSION(6)                              :: loc_buf
-      REAL(KIND=dp)                                      :: global_val, local_val, val_buf
+      REAL(KIND=dp)                                      :: global_val, local_val, val_buf, vref_buf
       TYPE(ri_rs_topk_type)                              :: topk_work
 
       topk_work = topk
@@ -215,6 +221,7 @@ CONTAINS
 
          loc_buf(:) = 0
          val_buf = 0.0_dp
+         vref_buf = 0.0_dp
          IF (para_env%mepos == src) THEN
             slot = 1
             DO k = 1, ri_rs_topk_size
@@ -224,11 +231,13 @@ CONTAINS
                END IF
             END DO
             val_buf = topk_work%val(slot, list_id)
+            vref_buf = topk_work%vref(slot, list_id)
             loc_buf(1:3) = topk_work%idx(:, slot, list_id)
             loc_buf(4:6) = topk_work%atom(:, slot, list_id)
             topk_work%val(slot, list_id) = -1.0_dp
          END IF
          CALL para_env%bcast(val_buf, src)
+         CALL para_env%bcast(vref_buf, src)
          CALL para_env%bcast(loc_buf, src)
 
          sym(:) = "??"
@@ -240,10 +249,11 @@ CONTAINS
          END DO
 
          IF (bs_env%unit_nr > 0) THEN
-            WRITE (bs_env%unit_nr, '(T4,A,I0,A,ES11.3,A,I0,A,I0,A,A,A,I0,A,3(2X,I0,1X,A2))') &
+            WRITE (bs_env%unit_nr, &
+                   '(T4,A,I0,A,ES11.3,A,I0,A,I0,A,A,A,I0,A,3(2X,I0,1X,A2),A,ES11.3)') &
                '#', m, ' val=', val_buf, ' (mu=', loc_buf(1), ' nu=', loc_buf(2), &
                ' ', TRIM(third_label), '=', loc_buf(3), ') atoms', &
-               loc_buf(4), sym(1), loc_buf(5), sym(2), loc_buf(6), sym(3)
+               loc_buf(4), sym(1), loc_buf(5), sym(2), loc_buf(6), sym(3), ' |v|= ', vref_buf
          END IF
       END DO
 
@@ -254,19 +264,23 @@ CONTAINS
 ! **************************************************************************************************
    SUBROUTINE ri_rs_atommax_reduce_print(bs_env, para_env, particle_set, atomic_kind_set, &
                                          atommax_e3c, atommax_e3c_idx, &
+                                         atommax_e3crel, atommax_e3crel_idx, &
                                          atommax_j, atommax_j_idx)
 
       TYPE(post_scf_bandstructure_type), POINTER         :: bs_env
       TYPE(mp_para_env_type), POINTER                    :: para_env
       TYPE(particle_type), DIMENSION(:), POINTER         :: particle_set
       TYPE(atomic_kind_type), DIMENSION(:), POINTER      :: atomic_kind_set
-      REAL(KIND=dp), DIMENSION(:), INTENT(IN)            :: atommax_e3c, atommax_j
-      INTEGER, DIMENSION(:, :), INTENT(IN)               :: atommax_e3c_idx, atommax_j_idx
+      REAL(KIND=dp), DIMENSION(:), INTENT(IN)            :: atommax_e3c, atommax_e3crel, &
+                                                            atommax_j
+      INTEGER, DIMENSION(:, :), INTENT(IN)               :: atommax_e3c_idx, atommax_e3crel_idx, &
+                                                            atommax_j_idx
 
       CHARACTER(LEN=2)                                   :: sym
-      INTEGER                                            :: iat, ik, natom, src_e3c, src_j
-      INTEGER, DIMENSION(3)                              :: idx_e3c, idx_j
+      INTEGER                                            :: iat, ik, natom, src_e3c, src_e3crel, src_j
+      INTEGER, DIMENSION(3)                              :: idx_e3c, idx_e3crel, idx_j
       REAL(KIND=dp)                                      :: e3c_glob, e3c_local, e3c_print, &
+                                                            e3crel_glob, e3crel_local, e3crel_print, &
                                                             j_glob, j_local, j_print
 
       natom = SIZE(particle_set)
@@ -289,6 +303,25 @@ CONTAINS
             idx_e3c(:) = 0
          ELSE
             e3c_print = e3c_glob
+         END IF
+
+         e3crel_local = atommax_e3crel(iat)
+         e3crel_glob = e3crel_local
+         CALL para_env%max(e3crel_glob)
+
+         src_e3crel = -1
+         IF (e3crel_local == e3crel_glob) src_e3crel = para_env%mepos
+         CALL para_env%max(src_e3crel)
+
+         idx_e3crel(:) = 0
+         IF (para_env%mepos == src_e3crel) idx_e3crel(:) = atommax_e3crel_idx(:, iat)
+         CALL para_env%bcast(idx_e3crel, src_e3crel)
+
+         IF (e3crel_glob < 0.0_dp) THEN
+            e3crel_print = 0.0_dp
+            idx_e3crel(:) = 0
+         ELSE
+            e3crel_print = e3crel_glob
          END IF
 
          j_local = atommax_j(iat)
@@ -320,6 +353,10 @@ CONTAINS
                'RI-RS fit error | atommax ', iat, TRIM(sym), ' | e3c ', e3c_print, &
                ' (mu= ', idx_e3c(1), ' nu= ', idx_e3c(2), ' P= ', idx_e3c(3), ') | J ', &
                j_print, ' (mu= ', idx_j(1), ' nu= ', idx_j(2), ' P= ', idx_j(3), ')'
+            WRITE (bs_env%unit_nr, &
+                   '(T2,A,I0,1X,A,A,ES11.3,A,I0,A,I0,A,I0,A)') &
+               'RI-RS fit error | atommaxrel ', iat, TRIM(sym), ' | e3c_rel ', e3crel_print, &
+               ' (mu= ', idx_e3crel(1), ' nu= ', idx_e3crel(2), ' P= ', idx_e3crel(3), ')'
          END IF
       END DO
 
@@ -986,7 +1023,8 @@ CONTAINS
          n_groups, n_loc_ri, n_local_grid, n_procs_per_atom, natom, nkind, num_grid_chunks, &
          P_loop_atom, r_end, r_start, source_atom
       INTEGER                                            :: j_full_info, n_ao_pair_total, naux_total
-      INTEGER, ALLOCATABLE, DIMENSION(:, :)              :: atommax_e3c_idx, atommax_j_idx
+      INTEGER, ALLOCATABLE, DIMENSION(:, :)              :: atommax_e3c_idx, atommax_e3crel_idx, &
+                                                            atommax_j_idx
       INTEGER, ALLOCATABLE, DIMENSION(:)                 :: local_grid_idx, row_offset
       INTEGER, DIMENSION(:), POINTER                     :: col_dist_phi, col_dist_ri, r_blk_sizes, &
                                                             ri_blk_sizes, row_dist_grid
@@ -1001,7 +1039,7 @@ CONTAINS
       INTEGER, DIMENSION(3)                              :: j_full_atom_max, j_full_idx_max
       TYPE(ri_rs_topk_type)                              :: fit_topk
       REAL(KIND=dp), ALLOCATABLE                         :: cutoff_ri_per_kind(:)
-      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:)           :: atommax_e3c, atommax_j, &
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:)           :: atommax_e3c, atommax_e3crel, atommax_j, &
                                                             cutoff_ri_per_atom, d_vec_local
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: D_local, d_lp_local, phi_local, &
                                                             sphere_grid, Z_blk
@@ -1177,11 +1215,13 @@ CONTAINS
          do_j_full = bs_env%ri_rs%print_fit_error .AND. &
                      (REAL(n_ao_pair_total, dp)*REAL(naux_total, dp)*8.0_dp <= ri_rs_j_full_max_bytes)
          IF (bs_env%ri_rs%print_fit_error) THEN
-            ALLOCATE (atommax_e3c(natom), atommax_j(natom))
-            ALLOCATE (atommax_e3c_idx(3, natom), atommax_j_idx(3, natom))
+            ALLOCATE (atommax_e3c(natom), atommax_e3crel(natom), atommax_j(natom))
+            ALLOCATE (atommax_e3c_idx(3, natom), atommax_e3crel_idx(3, natom), atommax_j_idx(3, natom))
             atommax_e3c(:) = -1.0_dp
+            atommax_e3crel(:) = -1.0_dp
             atommax_j(:) = -1.0_dp
             atommax_e3c_idx(:, :) = 0
+            atommax_e3crel_idx(:, :) = 0
             atommax_j_idx(:, :) = 0
             j_full_ok = .FALSE.
             j_full_info = 0
@@ -1384,6 +1424,7 @@ CONTAINS
                                          e3c_vmax, z_abs_max, &
                                          j_sq_sum, j_pair_max, j_idx_max, j_atom_max, &
                                          atommax_e3c, atommax_e3c_idx, &
+                                         atommax_e3crel, atommax_e3crel_idx, &
                                          atommax_j, atommax_j_idx, &
                                          R_full, n_ao_total, fit_topk, do_j_full)
             END IF
@@ -1448,12 +1489,14 @@ CONTAINS
                                           e3c_vmax, z_abs_max, &
                                           j_sq_sum, j_pair_max, j_idx_max, j_atom_max, &
                                           atommax_e3c, atommax_e3c_idx, &
+                                          atommax_e3crel, atommax_e3crel_idx, &
                                           atommax_j, atommax_j_idx, &
                                           j_full_ok, j_full_info, j_full_sq_sum, &
                                           j_full_pair_max, j_full_idx_max, j_full_atom_max, &
                                           fit_topk)
             DEALLOCATE (R_full)
-            DEALLOCATE (atommax_e3c, atommax_j, atommax_e3c_idx, atommax_j_idx)
+            DEALLOCATE (atommax_e3c, atommax_e3crel, atommax_j)
+            DEALLOCATE (atommax_e3c_idx, atommax_e3crel_idx, atommax_j_idx)
          END IF
 
          CALL dbcsr_finalize(mat_Z_lP)
@@ -1639,6 +1682,8 @@ CONTAINS
 !> \param j_atom_max (atom_j,atom_k,atom_P) at the running J_pair max (INOUT)
 !> \param atommax_e3c per-rank per-atom max abs 3c residual (INOUT)
 !> \param atommax_e3c_idx global (mu,nu,P) at each per-atom 3c max (INOUT)
+!> \param atommax_e3crel per-rank per-atom max relative 3c residual (INOUT)
+!> \param atommax_e3crel_idx global (mu,nu,P) at each per-atom relative 3c max (INOUT)
 !> \param atommax_j per-rank per-atom max J_pair, squared (INOUT)
 !> \param atommax_j_idx global (mu,nu,P_start) at each per-atom J max (INOUT)
 ! **************************************************************************************************
@@ -1646,7 +1691,8 @@ CONTAINS
                                    atom_P, max_ao_size, atom_j_mepos, atom_j_stride, &
                                    e_abs_max, idx_max, atom_max, vmax_loc, zmax_loc, &
                                    j_sq_sum, j_pair_max, j_idx_max, j_atom_max, &
-                                   atommax_e3c, atommax_e3c_idx, atommax_j, atommax_j_idx, &
+                                   atommax_e3c, atommax_e3c_idx, &
+                                   atommax_e3crel, atommax_e3crel_idx, atommax_j, atommax_j_idx, &
                                    R_full, n_ao_total, fit_topk, do_j_full)
 
       TYPE(post_scf_bandstructure_type), POINTER         :: bs_env
@@ -1660,8 +1706,10 @@ CONTAINS
       INTEGER, DIMENSION(3), INTENT(INOUT)               :: idx_max, atom_max
       REAL(KIND=dp), INTENT(INOUT)                       :: j_sq_sum, j_pair_max
       INTEGER, DIMENSION(3), INTENT(INOUT)               :: j_idx_max, j_atom_max
-      REAL(KIND=dp), DIMENSION(:), INTENT(INOUT)         :: atommax_e3c, atommax_j
-      INTEGER, DIMENSION(:, :), INTENT(INOUT)            :: atommax_e3c_idx, atommax_j_idx
+      REAL(KIND=dp), DIMENSION(:), INTENT(INOUT)         :: atommax_e3c, atommax_e3crel, &
+                                                            atommax_j
+      INTEGER, DIMENSION(:, :), INTENT(INOUT)            :: atommax_e3c_idx, atommax_e3crel_idx, &
+                                                            atommax_j_idx
       REAL(KIND=dp), DIMENSION(:, :), INTENT(INOUT)      :: R_full
       INTEGER, INTENT(IN)                                :: n_ao_total
       TYPE(ri_rs_topk_type), INTENT(INOUT)               :: fit_topk
@@ -1680,7 +1728,7 @@ CONTAINS
       INTEGER, DIMENSION(:), POINTER                     :: lmax_ri, lmin_ri, npgf_ri, nsgf_set_ri
       INTEGER, DIMENSION(:, :), POINTER                  :: first_sgf_ri
       LOGICAL                                            :: any_kept, have_metric, j_ok, screened, trunc_ok
-      REAL(KIND=dp)                                      :: err, exact, j_p, resid
+      REAL(KIND=dp)                                      :: err, exact, j_p, rel, resid
       REAL(KIND=dp), DIMENSION(3)                        :: pos_P_2c
       REAL(KIND=dp), DIMENSION(:, :), POINTER            :: rpgf_ri, sphi_ri, zet_ri
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: approx_2d, R_blk, rho_chunk, V_PP, &
@@ -1874,6 +1922,7 @@ CONTAINS
                      vmax_loc = MAX(vmax_loc, ABS(exact))
                      resid = approx_2d(jk_idx, ri) - exact
                      err = ABS(resid)
+                     rel = err/MAX(ABS(exact), ri_rs_relfloor)
                      IF (err > e_abs_max) THEN
                         e_abs_max = err
                         idx_max(1) = jstart + j - 1
@@ -1889,7 +1938,16 @@ CONTAINS
                                                jstart + j - 1, kstart + k - 1, P_start + ri - 1)
                      CALL ri_rs_atommax_update(atommax_e3c, atommax_e3c_idx, atom_P, err, &
                                                jstart + j - 1, kstart + k - 1, P_start + ri - 1)
-                     CALL ri_rs_topk_insert(fit_topk, ri_rs_topk_e3c, resid, &
+                     CALL ri_rs_atommax_update(atommax_e3crel, atommax_e3crel_idx, atom_j, rel, &
+                                               jstart + j - 1, kstart + k - 1, P_start + ri - 1)
+                     CALL ri_rs_atommax_update(atommax_e3crel, atommax_e3crel_idx, atom_k, rel, &
+                                               jstart + j - 1, kstart + k - 1, P_start + ri - 1)
+                     CALL ri_rs_atommax_update(atommax_e3crel, atommax_e3crel_idx, atom_P, rel, &
+                                               jstart + j - 1, kstart + k - 1, P_start + ri - 1)
+                     CALL ri_rs_topk_insert(fit_topk, ri_rs_topk_e3c, resid, ABS(exact), &
+                                            jstart + j - 1, kstart + k - 1, &
+                                            P_start + ri - 1, atom_j, atom_k, atom_P)
+                     CALL ri_rs_topk_insert(fit_topk, ri_rs_topk_e3crel, rel, ABS(exact), &
                                             jstart + j - 1, kstart + k - 1, &
                                             P_start + ri - 1, atom_j, atom_k, atom_P)
                      IF (do_j_full) THEN
@@ -1912,7 +1970,7 @@ CONTAINS
                   DO ri = 1, n_loc_ri
                      j_p = j_p + R_blk(ri, jk)*Y_blk(ri, jk)
                      IF (info_solve == 0) THEN
-                        CALL ri_rs_topk_insert(fit_topk, ri_rs_topk_mbare, Y_blk(ri, jk), &
+                        CALL ri_rs_topk_insert(fit_topk, ri_rs_topk_mbare, Y_blk(ri, jk), 0.0_dp, &
                                                jstart + j_rec - 1, kstart + k_rec - 1, &
                                                P_start + ri - 1, atom_j, atom_k, atom_P)
                      END IF
@@ -1942,7 +2000,7 @@ CONTAINS
                      k_rec = (jk - 1)/jsize + 1
                      j_rec = jk - (k_rec - 1)*jsize
                      DO ri = 1, n_loc_ri
-                        CALL ri_rs_topk_insert(fit_topk, ri_rs_topk_mtrunc, Y_trunc(ri, jk), &
+                        CALL ri_rs_topk_insert(fit_topk, ri_rs_topk_mtrunc, Y_trunc(ri, jk), 0.0_dp, &
                                                jstart + j_rec - 1, kstart + k_rec - 1, &
                                                P_start + ri - 1, atom_j, atom_k, atom_P)
                      END DO
@@ -2189,6 +2247,8 @@ CONTAINS
 !> \param j_atom_max per-rank (atom_j,atom_k,atom_P) at the J_pair max
 !> \param atommax_e3c per-rank per-atom max abs 3c residual
 !> \param atommax_e3c_idx global (mu,nu,P) at each per-atom 3c max
+!> \param atommax_e3crel per-rank per-atom max relative 3c residual
+!> \param atommax_e3crel_idx global (mu,nu,P) at each per-atom relative 3c max
 !> \param atommax_j per-rank per-atom max J_pair, squared
 !> \param atommax_j_idx global (mu,nu,P_start) at each per-atom J max
 !> \param j_full_ok true on the rank that successfully computed the full-J diagnostic
@@ -2201,7 +2261,8 @@ CONTAINS
    SUBROUTINE ri_rs_fit_error_finalize(bs_env, para_env, particle_set, atomic_kind_set, &
                                        e_abs_max, idx_max, atom_max, vmax_loc, zmax_loc, &
                                        j_sq_sum, j_pair_max, j_idx_max, j_atom_max, &
-                                       atommax_e3c, atommax_e3c_idx, atommax_j, atommax_j_idx, &
+                                       atommax_e3c, atommax_e3c_idx, &
+                                       atommax_e3crel, atommax_e3crel_idx, atommax_j, atommax_j_idx, &
                                        j_full_ok, j_full_info, j_full_sq_sum, j_full_pair_max, &
                                        j_full_idx_max, j_full_atom_max, fit_topk)
 
@@ -2213,8 +2274,10 @@ CONTAINS
       INTEGER, DIMENSION(3), INTENT(IN)                  :: idx_max, atom_max
       REAL(KIND=dp), INTENT(IN)                          :: j_sq_sum, j_pair_max
       INTEGER, DIMENSION(3), INTENT(IN)                  :: j_idx_max, j_atom_max
-      REAL(KIND=dp), DIMENSION(:), INTENT(IN)            :: atommax_e3c, atommax_j
-      INTEGER, DIMENSION(:, :), INTENT(IN)               :: atommax_e3c_idx, atommax_j_idx
+      REAL(KIND=dp), DIMENSION(:), INTENT(IN)            :: atommax_e3c, atommax_e3crel, &
+                                                            atommax_j
+      INTEGER, DIMENSION(:, :), INTENT(IN)               :: atommax_e3c_idx, atommax_e3crel_idx, &
+                                                            atommax_j_idx
       LOGICAL, INTENT(IN)                                :: j_full_ok
       INTEGER, INTENT(IN)                                :: j_full_info
       REAL(KIND=dp), INTENT(IN)                          :: j_full_sq_sum, j_full_pair_max
@@ -2375,6 +2438,7 @@ CONTAINS
 
       CALL ri_rs_atommax_reduce_print(bs_env, para_env, particle_set, atomic_kind_set, &
                                       atommax_e3c, atommax_e3c_idx, &
+                                      atommax_e3crel, atommax_e3crel_idx, &
                                       atommax_j, atommax_j_idx)
 
       CALL ri_rs_topk_reduce_print(bs_env, para_env, particle_set, atomic_kind_set, fit_topk, &
@@ -2386,6 +2450,9 @@ CONTAINS
       CALL ri_rs_topk_reduce_print(bs_env, para_env, particle_set, atomic_kind_set, fit_topk, &
                                    ri_rs_topk_mtrunc, &
                                    'RI-RS fit error | top-30 3c.Minv trunc (mu nu|Q):', 'Q')
+      CALL ri_rs_topk_reduce_print(bs_env, para_env, particle_set, atomic_kind_set, fit_topk, &
+                                   ri_rs_topk_e3crel, &
+                                   'RI-RS fit error | top-30 (mu nu|P) rel (floor 1.0E-02):', 'P')
 
       IF (bs_env%unit_nr > 0) THEN
          WRITE (bs_env%unit_nr, '(A)') ' '

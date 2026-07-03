@@ -496,7 +496,8 @@ CONTAINS
          n_groups, n_loc_ri, n_local_grid, n_procs_per_atom, natom, nkind, num_grid_chunks, &
          P_loop_atom, r_end, r_start, source_atom
       INTEGER                                            :: j_full_info, n_ao_pair_total, naux_total
-      INTEGER, ALLOCATABLE, DIMENSION(:, :)              :: atommax_e3c_idx, atommax_j_idx
+      INTEGER, ALLOCATABLE, DIMENSION(:, :)              :: atommax_e3c_idx, atommax_e3crel_idx, &
+                                                            atommax_j_idx
       INTEGER, ALLOCATABLE, DIMENSION(:)                 :: local_grid_idx, row_offset
       INTEGER, DIMENSION(:), POINTER                     :: col_dist_phi, col_dist_ri, r_blk_sizes, &
                                                             ri_blk_sizes, row_dist_grid
@@ -511,7 +512,8 @@ CONTAINS
       INTEGER, DIMENSION(3)                              :: j_full_atom_max, j_full_idx_max
       TYPE(ri_rs_topk_type)                              :: fit_topk
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:)           :: cutoff_ri_per_atom, cutoff_ri_per_kind, &
-                                                            d_vec_local, atommax_e3c, atommax_j
+                                                            d_vec_local, atommax_e3c, atommax_e3crel, &
+                                                            atommax_j
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: D_local, d_lp_local, phi_local, &
                                                             sphere_grid, Z_blk
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: R_full
@@ -685,11 +687,13 @@ CONTAINS
          do_j_full = bs_env%ri_rs%print_fit_error .AND. &
                      (REAL(n_ao_pair_total, dp)*REAL(naux_total, dp)*8.0_dp <= 2.0E9_dp)
          IF (bs_env%ri_rs%print_fit_error) THEN
-            ALLOCATE (atommax_e3c(natom), atommax_j(natom))
-            ALLOCATE (atommax_e3c_idx(3, natom), atommax_j_idx(3, natom))
+            ALLOCATE (atommax_e3c(natom), atommax_e3crel(natom), atommax_j(natom))
+            ALLOCATE (atommax_e3c_idx(3, natom), atommax_e3crel_idx(3, natom), atommax_j_idx(3, natom))
             atommax_e3c(:) = -1.0_dp
+            atommax_e3crel(:) = -1.0_dp
             atommax_j(:) = -1.0_dp
             atommax_e3c_idx(:, :) = 0
+            atommax_e3crel_idx(:, :) = 0
             atommax_j_idx(:, :) = 0
             j_full_ok = .FALSE.
             j_full_info = 0
@@ -899,6 +903,7 @@ CONTAINS
                                          e3c_vmax, z_abs_max, &
                                          j_sq_sum, j_pair_max, j_idx_max, j_atom_max, &
                                          atommax_e3c, atommax_e3c_idx, &
+                                         atommax_e3crel, atommax_e3crel_idx, &
                                          atommax_j, atommax_j_idx, &
                                          R_full, n_ao_total, fit_topk, do_j_full)
             END IF
@@ -962,12 +967,14 @@ CONTAINS
                                           e3c_vmax, z_abs_max, &
                                           j_sq_sum, j_pair_max, j_idx_max, j_atom_max, &
                                           atommax_e3c, atommax_e3c_idx, &
+                                          atommax_e3crel, atommax_e3crel_idx, &
                                           atommax_j, atommax_j_idx, &
                                           j_full_ok, j_full_info, j_full_sq_sum, &
                                           j_full_pair_max, j_full_idx_max, j_full_atom_max, &
                                           fit_topk)
             DEALLOCATE (R_full)
-            DEALLOCATE (atommax_e3c, atommax_j, atommax_e3c_idx, atommax_j_idx)
+            DEALLOCATE (atommax_e3c, atommax_e3crel, atommax_j)
+            DEALLOCATE (atommax_e3c_idx, atommax_e3crel_idx, atommax_j_idx)
          END IF
 
          CALL dbcsr_finalize(mat_Z_lP)
