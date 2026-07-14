@@ -18,4 +18,16 @@
                                           {matcher="E_RIRS_LUMO", tol=1e-03, ref=17.425},
                                           {matcher="E_G0W0_direct_gap", tol=1e-03, ref=23.517}]
 
+# Structured base-recipe grids (GRID_SELECT 3 + GRID_FILE_SUFFIX _base-rs.ion) on CH4 with
+# the aug-SZV-MOLOPT-ae-mini all-electron basis the grids were optimized for.
+# 06 loads the shipped grids as-is: C 125 + 4 x H 83 = 457 points.
+"06_RIRS_G0W0_PBE_CH4_BASE_GRID.inp"     = [{matcher="RIRS_Grid", tol=1e-03, ref=457},
+                                          {matcher="E_G0W0_direct_gap", tol=1e-03, ref=16.219}]
+
+# 07 escalates kind C by one Lebedev step outside the core (R_MIN 0.5 bohr): the 6 C shells
+# at r >= 0.5 go l=5 -> l=7 (14 -> 26 points each), C 125 -> 197, total 457 -> 529. The QP gap
+# is unchanged (a converged fit is only refined); the exact point count is the escalation check.
+"07_RIRS_G0W0_PBE_CH4_GRID_ESCALATION.inp" = [{matcher="RIRS_Grid", tol=1e-03, ref=529},
+                                          {matcher="E_G0W0_direct_gap", tol=1e-03, ref=16.219}]
+
 #EOF

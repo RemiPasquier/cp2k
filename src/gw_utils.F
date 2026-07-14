@@ -74,6 +74,7 @@ MODULE gw_utils
                                               section_vals_val_get,&
                                               section_vals_val_set
    USE kinds,                           ONLY: default_path_length,&
+                                              default_string_length,&
                                               dp,&
                                               int_8
    USE kpoint_k_r_trafo_simple,         ONLY: rs_to_kp
@@ -131,6 +132,7 @@ MODULE gw_utils
                                               distribution_3d_type,&
                                               neighbor_list_3c_type
    USE rpa_gw,                          ONLY: continuation_pade
+   USE string_utilities,                ONLY: uppercase
 #include "base/base_uses.f90"
 
    IMPLICIT NONE
@@ -300,6 +302,7 @@ CONTAINS
       CALL section_vals_val_get(gw_sec, "CUTOFF_RADIUS_RI_RS", r_val=bs_env%ri_rs%cutoff_radius_ri_rs)
       CALL section_vals_val_get(gw_sec, "N_PROCS_PER_ATOM_Z_LP", i_val=bs_env%ri_rs%n_procs_per_atom_z_lp)
       CALL section_vals_val_get(gw_sec, "PRINT_FIT_ERROR", l_val=bs_env%ri_rs%print_fit_error)
+      CALL read_ri_rs_grid_escalation(bs_env, gw_sec)
 
       IF (bs_env%print_contract) THEN
          bs_env%unit_nr_contract = bs_env%unit_nr
@@ -309,6 +312,67 @@ CONTAINS
       CALL timestop(handle)
 
    END SUBROUTINE read_gw_input_parameters
+
+! **************************************************************************************************
+!> \brief reads the repeatable &RI_RS_GRID_ESCALATION records into bs_env%ri_rs%escalation
+!> \param bs_env ...
+!> \param gw_sec ...
+! **************************************************************************************************
+   SUBROUTINE read_ri_rs_grid_escalation(bs_env, gw_sec)
+      TYPE(post_scf_bandstructure_type), POINTER         :: bs_env
+      TYPE(section_vals_type), POINTER                   :: gw_sec
+
+      CHARACTER(LEN=*), PARAMETER :: routineN = 'read_ri_rs_grid_escalation'
+
+      CHARACTER(LEN=default_string_length)               :: kind_name
+      INTEGER                                            :: handle, i_rep, j_rep, n_rep
+      LOGICAL                                            :: explicit
+      TYPE(section_vals_type), POINTER                   :: esc_sec
+
+      CALL timeset(routineN, handle)
+
+      NULLIFY (esc_sec)
+      esc_sec => section_vals_get_subs_vals(gw_sec, "RI_RS_GRID_ESCALATION")
+      CALL section_vals_get(esc_sec, explicit=explicit, n_repetition=n_rep)
+
+      IF (explicit .AND. n_rep > 0) THEN
+         ALLOCATE (bs_env%ri_rs%escalation(n_rep))
+         DO i_rep = 1, n_rep
+            CALL section_vals_val_get(esc_sec, "_SECTION_PARAMETERS_", i_rep_section=i_rep, &
+                                      c_val=kind_name)
+            CALL uppercase(kind_name)
+            bs_env%ri_rs%escalation(i_rep)%kind_name = kind_name
+            CALL section_vals_val_get(esc_sec, "STEPS", i_rep_section=i_rep, &
+                                      i_val=bs_env%ri_rs%escalation(i_rep)%steps)
+            CALL section_vals_val_get(esc_sec, "R_MIN", i_rep_section=i_rep, &
+                                      r_val=bs_env%ri_rs%escalation(i_rep)%r_min)
+            CALL section_vals_val_get(esc_sec, "R_MAX", i_rep_section=i_rep, &
+                                      r_val=bs_env%ri_rs%escalation(i_rep)%r_max)
+            IF (bs_env%ri_rs%escalation(i_rep)%steps < 0) THEN
+               CALL cp_abort(__LOCATION__, &
+                             "&RI_RS_GRID_ESCALATION "//TRIM(kind_name)//": STEPS must be >= 0.")
+            END IF
+            IF (bs_env%ri_rs%escalation(i_rep)%r_min < 0.0_dp) THEN
+               CALL cp_abort(__LOCATION__, &
+                             "&RI_RS_GRID_ESCALATION "//TRIM(kind_name)//": R_MIN must be >= 0.")
+            END IF
+            IF (bs_env%ri_rs%escalation(i_rep)%r_max >= 0.0_dp .AND. &
+                bs_env%ri_rs%escalation(i_rep)%r_max < bs_env%ri_rs%escalation(i_rep)%r_min) THEN
+               CALL cp_abort(__LOCATION__, &
+                             "&RI_RS_GRID_ESCALATION "//TRIM(kind_name)//": R_MAX must be >= R_MIN.")
+            END IF
+            DO j_rep = 1, i_rep - 1
+               IF (TRIM(bs_env%ri_rs%escalation(j_rep)%kind_name) == TRIM(kind_name)) THEN
+                  CALL cp_abort(__LOCATION__, &
+                                "&RI_RS_GRID_ESCALATION: duplicate record for kind "//TRIM(kind_name))
+               END IF
+            END DO
+         END DO
+      END IF
+
+      CALL timestop(handle)
+
+   END SUBROUTINE read_ri_rs_grid_escalation
 
 ! **************************************************************************************************
 !> \brief ...

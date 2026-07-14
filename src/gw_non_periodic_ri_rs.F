@@ -78,6 +78,8 @@ MODULE gw_non_periodic_ri_rs
                                               default_string_length,&
                                               dp
    USE kpoint_coulomb_2c,               ONLY: build_2c_coulomb_matrix_kp
+   USE lebedev,                         ONLY: get_number_of_lebedev_grid,&
+                                              lebedev_grid
    USE libint_2c_3c,                    ONLY: eri_2center,&
                                               libint_potential_type
    USE libint_wrapper,                  ONLY: cp_libint_cleanup_2eri,&
@@ -91,11 +93,14 @@ MODULE gw_non_periodic_ri_rs
                                               ncoset
    USE parallel_gemm_api,               ONLY: parallel_gemm
    USE particle_types,                  ONLY: particle_type
-   USE post_scf_bandstructure_types,    ONLY: post_scf_bandstructure_type
+   USE post_scf_bandstructure_types,    ONLY: post_scf_bandstructure_type,&
+                                              rirs_grid_escalation_type,&
+                                              rirs_grid_type
    USE qs_environment_types,            ONLY: get_qs_env,&
                                               qs_environment_type
    USE qs_kind_types,                   ONLY: get_qs_kind,&
                                               qs_kind_type
+   USE string_utilities,                ONLY: uppercase
 #include "./base/base_uses.f90"
 
    IMPLICIT NONE
@@ -669,8 +674,10 @@ CONTAINS
       TYPE(atomic_kind_type), DIMENSION(:), POINTER      :: atomic_kind_set
 
       CHARACTER(LEN=default_path_length)                 :: filename, full_path, line
-      CHARACTER(LEN=default_string_length)               :: atom_sym, suffix
-      INTEGER                                            :: colon_idx, i, ierr, ikind, iunit, nkind
+      CHARACTER(LEN=default_string_length)               :: atom_sym, kind_name, suffix
+      INTEGER                                            :: colon_idx, i, ierr, ikind, irec, iunit, &
+                                                            nkind
+      LOGICAL, ALLOCATABLE                               :: record_used(:)
       REAL(KIND=dp)                                      :: pt(3)
 
       ! Determine the file suffix based on the user's choice
@@ -690,6 +697,11 @@ CONTAINS
 
       nkind = SIZE(atomic_kind_set)
       IF (.NOT. ALLOCATED(bs_env%ri_rs%grid_cache)) ALLOCATE (bs_env%ri_rs%grid_cache(nkind))
+
+      IF (ALLOCATED(bs_env%ri_rs%escalation)) THEN
+         ALLOCATE (record_used(SIZE(bs_env%ri_rs%escalation)))
+         record_used(:) = .FALSE.
+      END IF
 
       DO ikind = 1, nkind
          atom_sym = TRIM(atomic_kind_set(ikind)%element_symbol)
@@ -731,10 +743,234 @@ CONTAINS
             bs_env%ri_rs%grid_cache(ikind)%raw_points(:, i) = pt(:)
          END DO
 
+         ! A-posteriori per-kind angular escalation (&RI_RS_GRID_ESCALATION)
+         IF (ALLOCATED(bs_env%ri_rs%escalation)) THEN
+            kind_name = TRIM(atomic_kind_set(ikind)%name)
+            CALL uppercase(kind_name)
+            DO irec = 1, SIZE(bs_env%ri_rs%escalation)
+               IF (TRIM(bs_env%ri_rs%escalation(irec)%kind_name) == TRIM(kind_name)) THEN
+                  record_used(irec) = .TRUE.
+                  IF (bs_env%ri_rs%escalation(irec)%steps > 0) THEN
+                     CALL escalate_grid_cache_entry(bs_env%ri_rs%grid_cache(ikind), &
+                                                    bs_env%ri_rs%escalation(irec), iunit, &
+                                                    TRIM(full_path), TRIM(kind_name), &
+                                                    bs_env%unit_nr)
+                  END IF
+               END IF
+            END DO
+         END IF
+
          CALL close_file(unit_number=iunit)
       END DO
 
+      IF (ALLOCATED(record_used)) THEN
+         DO irec = 1, SIZE(record_used)
+            IF (.NOT. record_used(irec)) THEN
+               CALL cp_abort(__LOCATION__, &
+                             "&RI_RS_GRID_ESCALATION: kind "// &
+                             TRIM(bs_env%ri_rs%escalation(irec)%kind_name)// &
+                             " does not match any atomic kind of the system.")
+            END IF
+         END DO
+         DEALLOCATE (record_used)
+      END IF
+
    END SUBROUTINE build_grid_cache
+
+! **************************************************************************************************
+!> \brief Applies one &RI_RS_GRID_ESCALATION record to a cached grid: parses the <ri_rs_shells>
+!>        metadata block from the open .ion file and rebuilds the selected shells at higher
+!>        Lebedev orders on frozen shell radii. Aborts with a clear message when the file
+!>        carries no shell metadata (arbitrary point clouds cannot be escalated).
+!> \param cache      the per-kind grid cache entry (points replaced in place)
+!> \param esc        the escalation record (steps, radial window)
+!> \param iunit      open unit of the .ion file (will be rewound)
+!> \param grid_path  file path, for error messages
+!> \param kind_name  kind label, for messages
+!> \param unit_nr    output unit (> 0 on the ionode only)
+! **************************************************************************************************
+   SUBROUTINE escalate_grid_cache_entry(cache, esc, iunit, grid_path, kind_name, unit_nr)
+
+      TYPE(rirs_grid_type), INTENT(INOUT)                :: cache
+      TYPE(rirs_grid_escalation_type), INTENT(IN)        :: esc
+      INTEGER, INTENT(IN)                                :: iunit
+      CHARACTER(LEN=*), INTENT(IN)                       :: grid_path, kind_name
+      INTEGER, INTENT(IN)                                :: unit_nr
+
+      CHARACTER(LEN=32)                                  :: word
+      CHARACTER(LEN=default_path_length)                 :: line
+      INTEGER :: colon_idx, i, idx_base, idx_new, ierr, ipt, ish, ish_read, n_ladder, n_raised, &
+         n_saturated, n_selected, n_shells, new_npts, npts_center, opos
+      INTEGER, ALLOCATABLE                               :: shell_first(:), shell_idx_new(:), &
+                                                            shell_npts(:), shell_order(:)
+      LOGICAL                                            :: found, selected
+      REAL(KIND=dp)                                      :: rnorm, tol
+      REAL(KIND=dp), ALLOCATABLE                         :: new_points(:, :), shell_radius(:)
+
+      ! trigger the lazy initialization of the Lebedev tables
+      idx_base = get_number_of_lebedev_grid(l=3)
+      n_ladder = SIZE(lebedev_grid)
+
+      ! ---- parse the <ri_rs_shells> metadata block ----
+      REWIND (iunit)
+      found = .FALSE.
+      DO
+         READ (iunit, '(A)', IOSTAT=ierr) line
+         IF (ierr /= 0) EXIT
+         IF (INDEX(line, '<ri_rs_shells') > 0) THEN
+            found = .TRUE.
+            EXIT
+         END IF
+      END DO
+      IF (.NOT. found) THEN
+         CALL cp_abort(__LOCATION__, &
+                       "&RI_RS_GRID_ESCALATION requested for kind "//kind_name// &
+                       ", but the grid file "//grid_path// &
+                       " carries no <ri_rs_shells> metadata block. Only grids shipped with "// &
+                       "explicit shell metadata can be escalated; arbitrary point clouds cannot.")
+      END IF
+
+      n_shells = 0
+      npts_center = -1
+      ish_read = 0
+      DO
+         READ (iunit, '(A)', IOSTAT=ierr) line
+         IF (ierr /= 0) THEN
+            CALL cp_abort(__LOCATION__, "Truncated <ri_rs_shells> block in "//grid_path)
+         END IF
+         IF (INDEX(line, '</ri_rs_shells>') > 0) EXIT
+         IF (INDEX(line, 'center_points') > 0) THEN
+            colon_idx = INDEX(line, ':')
+            READ (line(colon_idx + 1:), *) npts_center
+         ELSE IF (INDEX(line, 'n_shells') > 0) THEN
+            colon_idx = INDEX(line, ':')
+            READ (line(colon_idx + 1:), *) n_shells
+            ALLOCATE (shell_radius(n_shells), shell_order(n_shells), shell_npts(n_shells), &
+                      shell_first(n_shells), shell_idx_new(n_shells))
+         ELSE
+            READ (line, *, IOSTAT=ierr) word, ish, rnorm, i, ipt, opos
+            IF (ierr /= 0) CYCLE
+            IF (TRIM(word) /= 'shell') CYCLE
+            IF (n_shells == 0) THEN
+               CALL cp_abort(__LOCATION__, "<ri_rs_shells> block in "//grid_path// &
+                             ": shell record before n_shells.")
+            END IF
+            ish_read = ish_read + 1
+            IF (ish /= ish_read .OR. ish > n_shells) THEN
+               CALL cp_abort(__LOCATION__, "<ri_rs_shells> block in "//grid_path// &
+                             ": shell indices not consecutive.")
+            END IF
+            shell_radius(ish) = rnorm
+            shell_order(ish) = i
+            shell_npts(ish) = ipt
+            shell_first(ish) = opos
+         END IF
+      END DO
+      IF (npts_center < 0 .OR. n_shells == 0 .OR. ish_read /= n_shells) THEN
+         CALL cp_abort(__LOCATION__, "<ri_rs_shells> block in "//grid_path// &
+                       " is incomplete (center_points/n_shells/shell records).")
+      END IF
+
+      ! ---- validate the metadata against the point payload ----
+      opos = npts_center + 1
+      DO ish = 1, n_shells
+         IF (shell_first(ish) /= opos) THEN
+            CALL cp_abort(__LOCATION__, "<ri_rs_shells> block in "//grid_path// &
+                          ": shell point ranges are not contiguous after the center points.")
+         END IF
+         opos = opos + shell_npts(ish)
+         IF (shell_radius(ish) <= 0.0_dp) THEN
+            CALL cp_abort(__LOCATION__, "<ri_rs_shells> block in "//grid_path// &
+                          ": non-positive shell radius.")
+         END IF
+      END DO
+      IF (opos - 1 /= cache%npts) THEN
+         CALL cp_abort(__LOCATION__, "<ri_rs_shells> block in "//grid_path// &
+                       ": center_points + shell points do not add up to 'n points'.")
+      END IF
+      DO ish = 1, n_shells
+         idx_base = 0
+         DO i = 1, n_ladder
+            IF (lebedev_grid(i)%l == shell_order(ish)) idx_base = i
+         END DO
+         IF (idx_base == 0) THEN
+            CALL cp_abort(__LOCATION__, "<ri_rs_shells> block in "//grid_path// &
+                          ": shell Lebedev order is not implemented in CP2K "// &
+                          "(implemented: l = 3, 5, 7, 9, 11, 15, ..., 53).")
+         END IF
+         IF (lebedev_grid(idx_base)%n /= shell_npts(ish)) THEN
+            CALL cp_abort(__LOCATION__, "<ri_rs_shells> block in "//grid_path// &
+                          ": shell point count does not match its declared Lebedev order.")
+         END IF
+         tol = 1.0E-8_dp*MAX(1.0_dp, shell_radius(ish))
+         DO ipt = shell_first(ish), shell_first(ish) + shell_npts(ish) - 1
+            rnorm = SQRT(SUM(cache%raw_points(:, ipt)**2))
+            IF (ABS(rnorm - shell_radius(ish)) > tol) THEN
+               CALL cp_abort(__LOCATION__, "<ri_rs_shells> block in "//grid_path// &
+                             ": point radii deviate from the declared shell radius.")
+            END IF
+         END DO
+         ! resolve the escalated ladder position of this shell
+         selected = (shell_radius(ish) >= esc%r_min) .AND. &
+                    (esc%r_max < 0.0_dp .OR. shell_radius(ish) <= esc%r_max)
+         IF (selected) THEN
+            shell_idx_new(ish) = MIN(idx_base + esc%steps, n_ladder)
+         ELSE
+            shell_idx_new(ish) = idx_base
+         END IF
+      END DO
+
+      ! ---- rebuild the point payload with escalated shells (frozen radii) ----
+      n_selected = 0
+      n_raised = 0
+      n_saturated = 0
+      new_npts = npts_center
+      DO ish = 1, n_shells
+         new_npts = new_npts + lebedev_grid(shell_idx_new(ish))%n
+      END DO
+      ALLOCATE (new_points(3, new_npts))
+      new_points(:, 1:npts_center) = cache%raw_points(:, 1:npts_center)
+      opos = npts_center
+      DO ish = 1, n_shells
+         idx_base = 0
+         DO i = 1, n_ladder
+            IF (lebedev_grid(i)%l == shell_order(ish)) idx_base = i
+         END DO
+         selected = (shell_radius(ish) >= esc%r_min) .AND. &
+                    (esc%r_max < 0.0_dp .OR. shell_radius(ish) <= esc%r_max)
+         IF (selected) n_selected = n_selected + 1
+         idx_new = shell_idx_new(ish)
+         IF (idx_new > idx_base) THEN
+            n_raised = n_raised + 1
+            IF (selected .AND. idx_base + esc%steps > n_ladder) n_saturated = n_saturated + 1
+            DO ipt = 1, lebedev_grid(idx_new)%n
+               new_points(:, opos + ipt) = shell_radius(ish)*lebedev_grid(idx_new)%r(:, ipt)
+            END DO
+         ELSE
+            IF (selected) n_saturated = n_saturated + 1
+            new_points(:, opos + 1:opos + shell_npts(ish)) = &
+               cache%raw_points(:, shell_first(ish):shell_first(ish) + shell_npts(ish) - 1)
+         END IF
+         opos = opos + lebedev_grid(idx_new)%n
+      END DO
+
+      IF (unit_nr > 0) THEN
+         WRITE (unit_nr, FMT="(T2,A,A,A,I3,A)") &
+            'RI-RS grid escalation for kind ', kind_name, ':', esc%steps, ' Lebedev step(s)'
+         WRITE (unit_nr, FMT="(T2,A,I4,A,I4,A,I4,A)") &
+            'selected shells:', n_selected, '  raised:', n_raised, '  saturated:', n_saturated, &
+            '  (radii frozen)'
+         WRITE (unit_nr, FMT="(T2,A,I8,A,I8)") &
+            'grid points per atom of this kind:', cache%npts, ' ->', new_npts
+         WRITE (unit_nr, "(A)") ' '
+      END IF
+
+      CALL MOVE_ALLOC(new_points, cache%raw_points)
+      cache%npts = new_npts
+
+      DEALLOCATE (shell_radius, shell_order, shell_npts, shell_first, shell_idx_new)
+
+   END SUBROUTINE escalate_grid_cache_entry
 
 ! **************************************************************************************************
 !> \brief Evaluates atomic basis functions on a real-space grid and builds a sparse DBCSR matrix.

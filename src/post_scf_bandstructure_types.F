@@ -41,7 +41,8 @@ MODULE post_scf_bandstructure_types
 
    CHARACTER(len=*), PARAMETER, PRIVATE :: moduleN = 'post_scf_bandstructure_types'
 
-   PUBLIC :: post_scf_bandstructure_type, band_edges_type, data_3_type, bs_env_release
+   PUBLIC :: post_scf_bandstructure_type, band_edges_type, data_3_type, bs_env_release, &
+             rirs_grid_escalation_type, rirs_grid_type
 
    ! valence band maximum (VBM), conduction band minimum (CBM), direct band gap (DBG),
    ! indirect band gap (IDBG)
@@ -62,6 +63,14 @@ MODULE post_scf_bandstructure_types
       INTEGER                    :: npts = 0
       REAL(KIND=dp), ALLOCATABLE :: raw_points(:, :)
    END TYPE rirs_grid_type
+
+   ! one user-requested a-posteriori angular escalation record (&RI_RS_GRID_ESCALATION)
+   TYPE rirs_grid_escalation_type
+      CHARACTER(LEN=default_string_length) :: kind_name = ""
+      INTEGER                              :: steps = 0
+      REAL(KIND=dp)                        :: r_min = 0.0_dp
+      REAL(KIND=dp)                        :: r_max = -1.0_dp
+   END TYPE rirs_grid_escalation_type
 
    TYPE ri_rs_env
 
@@ -85,6 +94,9 @@ MODULE post_scf_bandstructure_types
 
       ! Data types for building grid points
       TYPE(rirs_grid_type), ALLOCATABLE                :: grid_cache(:)
+
+      ! User-requested per-kind a-posteriori angular escalation records (may be unallocated)
+      TYPE(rirs_grid_escalation_type), ALLOCATABLE     :: escalation(:)
 
       ! Data types for storing RI-RS matrices
       TYPE(dbcsr_type)                                 :: mat_phi_mu_l
@@ -526,6 +538,7 @@ CONTAINS
       IF (ALLOCATED(bs_env%ri_rs%grid_cache)) DEALLOCATE (bs_env%ri_rs%grid_cache)
       IF (ALLOCATED(bs_env%ri_rs%radius_ao_per_atom)) DEALLOCATE (bs_env%ri_rs%radius_ao_per_atom)
       IF (ALLOCATED(bs_env%ri_rs%radius_ri_per_atom)) DEALLOCATE (bs_env%ri_rs%radius_ri_per_atom)
+      IF (ALLOCATED(bs_env%ri_rs%escalation)) DEALLOCATE (bs_env%ri_rs%escalation)
 
       DEALLOCATE (bs_env)
 

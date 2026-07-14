@@ -2555,6 +2555,11 @@ CONTAINS
       CALL section_add_keyword(section, keyword)
       CALL keyword_release(keyword)
 
+      NULLIFY (subsection)
+      CALL create_ri_rs_grid_escalation_section(subsection)
+      CALL section_add_subsection(section, subsection)
+      CALL section_release(subsection)
+
       NULLIFY (subsection, print_key)
       CALL section_create(subsection, __LOCATION__, name="PRINT", &
                           description="Printing of GW restarts.", &
@@ -2623,7 +2628,9 @@ CONTAINS
                           "(2) cc-pVTZ: Optimized grids available for H, C, N, and O atoms "// &
                           "(see https://doi.org/10.1063/1.5090605). "// &
                           "(3) RI-RS optimized: grids from this project's offline optimizer, "// &
-                          "staged as ri_rs_grid/<El>_rirs-tzvp.ion.", &
+                          "staged as ri_rs_grid/<El>_rirs-tzvp.ion (or via `GRID_FILE_SUFFIX`, "// &
+                          "e.g. the structured base-recipe family <El>_base-rs.ion whose "// &
+                          "explicit shell metadata supports `&RI_RS_GRID_ESCALATION`).", &
                           usage="GRID_SELECT 1", &
                           default_i_val=1)
       CALL section_add_keyword(section, keyword)
@@ -2683,6 +2690,71 @@ CONTAINS
       CALL section_release(subsection)
 
    END SUBROUTINE create_gw_section
+
+! **************************************************************************************************
+!> \brief creates the repeatable per-kind section for a-posteriori RI-RS grid angular escalation
+!> \param section section to create
+! **************************************************************************************************
+   SUBROUTINE create_ri_rs_grid_escalation_section(section)
+      TYPE(section_type), POINTER                        :: section
+
+      TYPE(keyword_type), POINTER                        :: keyword
+
+      CPASSERT(.NOT. ASSOCIATED(section))
+      CALL section_create(section, __LOCATION__, name="RI_RS_GRID_ESCALATION", &
+                          description="A-posteriori angular escalation of the RI-RS real-space "// &
+                          "grid of one atomic kind: raises the per-shell Lebedev orders of the "// &
+                          "shipped grid at frozen radial shell positions. Intended workflow: when "// &
+                          "GW results plateau with grid quality, repeat this section for the "// &
+                          "affected kind(s) with `STEPS` > 0. Requires the `.ion` grid file to "// &
+                          "carry explicit shell metadata (a `<ri_rs_shells>` block in the "// &
+                          "preamble); aborts with a clear message otherwise. Escalation never "// &
+                          "changes shell radii and never removes points; grids without an active "// &
+                          "escalation record are used exactly as shipped.", &
+                          n_keywords=4, n_subsections=0, repeats=.TRUE.)
+
+      NULLIFY (keyword)
+      CALL keyword_create(keyword, __LOCATION__, name="_SECTION_PARAMETERS_", &
+                          description="Name of the atomic kind (the `&KIND` label) whose RI-RS "// &
+                          "grid is escalated.", &
+                          usage="C", default_c_val="DEFAULT")
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+
+      CALL keyword_create(keyword, __LOCATION__, name="STEPS", &
+                          description="Number of positions each selected shell advances on the "// &
+                          "ladder of implemented Lebedev orders (l = 3, 5, 7, 9, 11, 15, ...). "// &
+                          "Shells already at the largest implemented order saturate there. "// &
+                          "0 disables escalation for this kind (default behavior).", &
+                          usage="STEPS 1", &
+                          default_i_val=0)
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+
+      CALL keyword_create(keyword, __LOCATION__, name="R_MIN", &
+                          description="Inclusive lower bound of the radial window: only shells "// &
+                          "with radius >= `R_MIN` are escalated. Default 0 selects from the "// &
+                          "innermost shell. Core shells (radius < ~0.5 Bohr) typically carry no "// &
+                          "cross-center content, so raising `R_MIN` saves points at little cost.", &
+                          usage="R_MIN [bohr] 0.5", &
+                          default_r_val=cp_unit_to_cp2k(value=0.0_dp, unit_str="bohr"), &
+                          type_of_var=real_t, unit_str="bohr")
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+
+      CALL keyword_create(keyword, __LOCATION__, name="R_MAX", &
+                          description="Inclusive upper bound of the radial window: only shells "// &
+                          "with radius <= `R_MAX` are escalated. Any negative value (default) "// &
+                          "means no upper bound. NOTE: the outermost shells typically carry "// &
+                          "cross-center content, so restricting `R_MAX` degrades the escalation "// &
+                          "benefit; intended for expert use.", &
+                          usage="R_MAX [bohr] 4.0", &
+                          default_r_val=cp_unit_to_cp2k(value=-1.0_dp, unit_str="bohr"), &
+                          type_of_var=real_t, unit_str="bohr")
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+
+   END SUBROUTINE create_ri_rs_grid_escalation_section
 
 ! **************************************************************************************************
 !> \brief creates an input section for calculation SOC for the electronic band structure
