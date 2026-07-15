@@ -30,4 +30,11 @@
 "07_RIRS_G0W0_PBE_CH4_GRID_ESCALATION.inp" = [{matcher="RIRS_Grid", tol=1e-03, ref=529},
                                           {matcher="E_G0W0_direct_gap", tol=1e-03, ref=16.219}]
 
+# 08 sets kind C's per-shell orders explicitly (SHELL_ORDERS 3 3 3 5 7 7 7 9 9 9):
+# lowers shell 3 (l=5 -> l=3, removing points), keeps shells 1/2/4, raises shells 5-10.
+# C 125 -> 225, H untouched (83), CH4 total 457 -> 557. The exact count discriminates the
+# per-shell rebuild (incl. the lowering path); the gap ref is filled from the run.
+"08_RIRS_G0W0_PBE_CH4_SHELL_ORDERS.inp"  = [{matcher="RIRS_Grid", tol=1e-03, ref=557},
+                                          {matcher="E_G0W0_direct_gap", tol=1e-03, ref=16.219}]
+
 #EOF

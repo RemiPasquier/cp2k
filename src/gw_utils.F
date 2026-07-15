@@ -326,7 +326,8 @@ CONTAINS
 
       CHARACTER(LEN=default_string_length)               :: kind_name
       INTEGER                                            :: handle, i_rep, j_rep, n_rep
-      LOGICAL                                            :: explicit
+      INTEGER, DIMENSION(:), POINTER                     :: so_vals
+      LOGICAL                                            :: explicit, so_explicit
       TYPE(section_vals_type), POINTER                   :: esc_sec
 
       CALL timeset(routineN, handle)
@@ -360,6 +361,17 @@ CONTAINS
                 bs_env%ri_rs%escalation(i_rep)%r_max < bs_env%ri_rs%escalation(i_rep)%r_min) THEN
                CALL cp_abort(__LOCATION__, &
                              "&RI_RS_GRID_ESCALATION "//TRIM(kind_name)//": R_MAX must be >= R_MIN.")
+            END IF
+            NULLIFY (so_vals)
+            ! query explicitness WITHOUT fetching the value: a no-default keyword aborts
+            ! ("value requested, but no value set") if i_vals is requested when unset
+            CALL section_vals_val_get(esc_sec, "SHELL_ORDERS", i_rep_section=i_rep, &
+                                      explicit=so_explicit)
+            IF (so_explicit) THEN
+               CALL section_vals_val_get(esc_sec, "SHELL_ORDERS", i_rep_section=i_rep, &
+                                         i_vals=so_vals)
+               ALLOCATE (bs_env%ri_rs%escalation(i_rep)%shell_orders(SIZE(so_vals)))
+               bs_env%ri_rs%escalation(i_rep)%shell_orders(:) = so_vals(:)
             END IF
             DO j_rep = 1, i_rep - 1
                IF (TRIM(bs_env%ri_rs%escalation(j_rep)%kind_name) == TRIM(kind_name)) THEN

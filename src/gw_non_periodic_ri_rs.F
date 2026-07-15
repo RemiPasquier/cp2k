@@ -750,7 +750,8 @@ CONTAINS
             DO irec = 1, SIZE(bs_env%ri_rs%escalation)
                IF (TRIM(bs_env%ri_rs%escalation(irec)%kind_name) == TRIM(kind_name)) THEN
                   record_used(irec) = .TRUE.
-                  IF (bs_env%ri_rs%escalation(irec)%steps > 0) THEN
+                  IF (bs_env%ri_rs%escalation(irec)%steps > 0 .OR. &
+                      ALLOCATED(bs_env%ri_rs%escalation(irec)%shell_orders)) THEN
                      CALL escalate_grid_cache_entry(bs_env%ri_rs%grid_cache(ikind), &
                                                     bs_env%ri_rs%escalation(irec), iunit, &
                                                     TRIM(full_path), TRIM(kind_name), &
@@ -799,8 +800,8 @@ CONTAINS
 
       CHARACTER(LEN=32)                                  :: word
       CHARACTER(LEN=default_path_length)                 :: line
-      INTEGER :: colon_idx, i, idx_base, idx_new, ierr, ipt, ish, ish_read, n_ladder, n_raised, &
-         n_saturated, n_selected, n_shells, new_npts, npts_center, opos
+      INTEGER :: colon_idx, i, idx_base, idx_new, ierr, ipt, ish, ish_read, n_ladder, n_lowered, &
+         n_raised, n_shells, new_npts, npts_center, opos
       INTEGER, ALLOCATABLE                               :: shell_first(:), shell_idx_new(:), &
                                                             shell_npts(:), shell_order(:)
       LOGICAL                                            :: found, selected
@@ -888,6 +889,14 @@ CONTAINS
          CALL cp_abort(__LOCATION__, "<ri_rs_shells> block in "//grid_path// &
                        ": center_points + shell points do not add up to 'n points'.")
       END IF
+      IF (ALLOCATED(esc%shell_orders)) THEN
+         IF (SIZE(esc%shell_orders) /= n_shells) THEN
+            WRITE (line, '(A,I0,A,I0,A)') &
+               "&RI_RS_GRID_ESCALATION SHELL_ORDERS has ", SIZE(esc%shell_orders), &
+               " entries but the grid has ", n_shells, " shells."
+            CALL cp_abort(__LOCATION__, TRIM(line)//" File: "//TRIM(grid_path))
+         END IF
+      END IF
       DO ish = 1, n_shells
          idx_base = 0
          DO i = 1, n_ladder
@@ -911,19 +920,33 @@ CONTAINS
             END IF
          END DO
          ! resolve the escalated ladder position of this shell
-         selected = (shell_radius(ish) >= esc%r_min) .AND. &
-                    (esc%r_max < 0.0_dp .OR. shell_radius(ish) <= esc%r_max)
-         IF (selected) THEN
-            shell_idx_new(ish) = MIN(idx_base + esc%steps, n_ladder)
+         IF (ALLOCATED(esc%shell_orders)) THEN
+            ! explicit per-shell order list overrides STEPS and the radial window
+            idx_new = 0
+            DO i = 1, n_ladder
+               IF (lebedev_grid(i)%l == esc%shell_orders(ish)) idx_new = i
+            END DO
+            IF (idx_new == 0) THEN
+               WRITE (line, '(A,I0,A,I0,A)') &
+                  "&RI_RS_GRID_ESCALATION SHELL_ORDERS entry ", ish, " requests Lebedev order ", &
+                  esc%shell_orders(ish), " which is not implemented (l = 3, 5, 7, 9, 11, 15, ...)."
+               CALL cp_abort(__LOCATION__, TRIM(line))
+            END IF
+            shell_idx_new(ish) = idx_new
          ELSE
-            shell_idx_new(ish) = idx_base
+            selected = (shell_radius(ish) >= esc%r_min) .AND. &
+                       (esc%r_max < 0.0_dp .OR. shell_radius(ish) <= esc%r_max)
+            IF (selected) THEN
+               shell_idx_new(ish) = MIN(idx_base + esc%steps, n_ladder)
+            ELSE
+               shell_idx_new(ish) = idx_base
+            END IF
          END IF
       END DO
 
       ! ---- rebuild the point payload with escalated shells (frozen radii) ----
-      n_selected = 0
       n_raised = 0
-      n_saturated = 0
+      n_lowered = 0
       new_npts = npts_center
       DO ish = 1, n_shells
          new_npts = new_npts + lebedev_grid(shell_idx_new(ish))%n
@@ -936,18 +959,17 @@ CONTAINS
          DO i = 1, n_ladder
             IF (lebedev_grid(i)%l == shell_order(ish)) idx_base = i
          END DO
-         selected = (shell_radius(ish) >= esc%r_min) .AND. &
-                    (esc%r_max < 0.0_dp .OR. shell_radius(ish) <= esc%r_max)
-         IF (selected) n_selected = n_selected + 1
          idx_new = shell_idx_new(ish)
-         IF (idx_new > idx_base) THEN
-            n_raised = n_raised + 1
-            IF (selected .AND. idx_base + esc%steps > n_ladder) n_saturated = n_saturated + 1
+         IF (idx_new /= idx_base) THEN
+            IF (idx_new > idx_base) THEN
+               n_raised = n_raised + 1
+            ELSE
+               n_lowered = n_lowered + 1
+            END IF
             DO ipt = 1, lebedev_grid(idx_new)%n
                new_points(:, opos + ipt) = shell_radius(ish)*lebedev_grid(idx_new)%r(:, ipt)
             END DO
          ELSE
-            IF (selected) n_saturated = n_saturated + 1
             new_points(:, opos + 1:opos + shell_npts(ish)) = &
                cache%raw_points(:, shell_first(ish):shell_first(ish) + shell_npts(ish) - 1)
          END IF
@@ -955,11 +977,16 @@ CONTAINS
       END DO
 
       IF (unit_nr > 0) THEN
-         WRITE (unit_nr, FMT="(T2,A,A,A,I3,A)") &
-            'RI-RS grid escalation for kind ', kind_name, ':', esc%steps, ' Lebedev step(s)'
-         WRITE (unit_nr, FMT="(T2,A,I4,A,I4,A,I4,A)") &
-            'selected shells:', n_selected, '  raised:', n_raised, '  saturated:', n_saturated, &
-            '  (radii frozen)'
+         IF (ALLOCATED(esc%shell_orders)) THEN
+            WRITE (unit_nr, FMT="(T2,A,A,A,I4,A)") &
+               'RI-RS grid escalation for kind ', TRIM(kind_name), &
+               ': explicit SHELL_ORDERS over ', n_shells, ' shells'
+         ELSE
+            WRITE (unit_nr, FMT="(T2,A,A,A,I3,A)") &
+               'RI-RS grid escalation for kind ', TRIM(kind_name), ':', esc%steps, ' Lebedev step(s)'
+         END IF
+         WRITE (unit_nr, FMT="(T2,A,I4,A,I4,A)") &
+            'shells raised:', n_raised, '  lowered:', n_lowered, '  (radii frozen)'
          WRITE (unit_nr, FMT="(T2,A,I8,A,I8)") &
             'grid points per atom of this kind:', cache%npts, ' ->', new_npts
          WRITE (unit_nr, "(A)") ' '

@@ -2708,10 +2708,12 @@ CONTAINS
                           "GW results plateau with grid quality, repeat this section for the "// &
                           "affected kind(s) with `STEPS` > 0. Requires the `.ion` grid file to "// &
                           "carry explicit shell metadata (a `<ri_rs_shells>` block in the "// &
-                          "preamble); aborts with a clear message otherwise. Escalation never "// &
-                          "changes shell radii and never removes points; grids without an active "// &
-                          "escalation record are used exactly as shipped.", &
-                          n_keywords=4, n_subsections=0, repeats=.TRUE.)
+                          "preamble); aborts with a clear message otherwise. Escalation keeps the "// &
+                          "shell radii frozen. `STEPS` raises orders only (never removes points); "// &
+                          "`SHELL_ORDERS` sets each shell's order explicitly and MAY lower it "// &
+                          "(removing points). Grids without an active escalation record are used "// &
+                          "exactly as shipped.", &
+                          n_keywords=5, n_subsections=0, repeats=.TRUE.)
 
       NULLIFY (keyword)
       CALL keyword_create(keyword, __LOCATION__, name="_SECTION_PARAMETERS_", &
@@ -2751,6 +2753,19 @@ CONTAINS
                           usage="R_MAX [bohr] 4.0", &
                           default_r_val=cp_unit_to_cp2k(value=-1.0_dp, unit_str="bohr"), &
                           type_of_var=real_t, unit_str="bohr")
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+
+      CALL keyword_create(keyword, __LOCATION__, name="SHELL_ORDERS", &
+                          description="Explicit Lebedev order for every radial shell, given in "// &
+                          "shell order as listed in the grid file's `<ri_rs_shells>` block. When "// &
+                          "present this overrides STEPS/R_MIN/R_MAX. The number of entries must "// &
+                          "equal the number of shells in the `.ion` grid (a mismatch aborts). Each "// &
+                          "value must be an implemented Lebedev order (l = 3, 5, 7, 9, 11, 15, ...). "// &
+                          "An order below the shipped shell order is allowed and REMOVES points "// &
+                          "(fully manual control; you own the fit convergence).", &
+                          usage="SHELL_ORDERS 3 5 7 9 9 9 7 5", &
+                          n_var=-1, type_of_var=integer_t)
       CALL section_add_keyword(section, keyword)
       CALL keyword_release(keyword)
 

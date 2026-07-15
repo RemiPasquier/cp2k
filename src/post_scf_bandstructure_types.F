@@ -70,6 +70,9 @@ MODULE post_scf_bandstructure_types
       INTEGER                              :: steps = 0
       REAL(KIND=dp)                        :: r_min = 0.0_dp
       REAL(KIND=dp)                        :: r_max = -1.0_dp
+      ! explicit per-shell Lebedev orders (SHELL_ORDERS); when allocated it overrides
+      ! steps/r_min/r_max and may also LOWER a shell's order (removing points)
+      INTEGER, DIMENSION(:), ALLOCATABLE   :: shell_orders
    END TYPE rirs_grid_escalation_type
 
    TYPE ri_rs_env
