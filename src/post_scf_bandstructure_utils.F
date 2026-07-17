@@ -2162,6 +2162,10 @@ CONTAINS
          WRITE (u, print_format) scf_gw_soc, ' conduction band minimum (eV):', band_edges%CBM*evolt
          WRITE (u, print_format) scf_gw_soc, ' indirect band gap (eV):', band_edges%IDBG*evolt
          WRITE (u, print_format) scf_gw_soc, ' direct band gap (eV):', band_edges%DBG*evolt
+         ! high-precision copies (benchmark harvesting; F20.3 above quantizes at 1 meV)
+         WRITE (u, '(T2,2A,T51,F30.9)') scf_gw_soc, ' VBM (high precision, eV):', band_edges%VBM*evolt
+         WRITE (u, '(T2,2A,T51,F30.9)') scf_gw_soc, ' CBM (high precision, eV):', band_edges%CBM*evolt
+         WRITE (u, '(T2,2A,T51,F30.9)') scf_gw_soc, ' direct band gap (high precision, eV):', band_edges%DBG*evolt
       END IF
 
       CALL timestop(handle)
