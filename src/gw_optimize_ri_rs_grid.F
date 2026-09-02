@@ -23,9 +23,7 @@ MODULE gw_optimize_ri_rs_grid
                                               gw_3c_ws_create,&
                                               gw_3c_ws_release,&
                                               gw_3c_ws_type
-   USE input_constants,                 ONLY: do_potential_truncated
    USE kinds,                           ONLY: dp
-   USE libint_2c_3c,                    ONLY: libint_potential_type
    USE message_passing,                 ONLY: mp_para_env_type
    USE particle_types,                  ONLY: particle_type
    USE physcon,                         ONLY: angstrom
@@ -40,7 +38,6 @@ MODULE gw_optimize_ri_rs_grid
 
    CHARACTER(len=*), PARAMETER, PRIVATE :: moduleN = 'gw_optimize_ri_rs_grid'
    REAL(KIND=dp), PARAMETER, PRIVATE :: optimizer_accuracy = 1.0E-9_dp
-   REAL(KIND=dp), PARAMETER, PRIVATE :: truncated_coulomb_cutoff = 3.0_dp/angstrom
 
    TYPE :: local_cluster_type
       INTEGER, ALLOCATABLE                 :: atoms(:)
@@ -121,15 +118,18 @@ CONTAINS
          grid_offsets(iatom) = n_variable
          n_variable = n_variable + 3*SIZE(bs_env%ri_rs%grid_cache(iatom)%raw_points, 2)
       END DO
-      BLOCK
-         TYPE(libint_potential_type) :: potential
-         potential%potential_type = do_potential_truncated
-         potential%cutoff_radius = truncated_coulomb_cutoff
-         potential%omega = 0.0_dp
-         potential%filename = "t_c_g.dat"
-         CALL gw_3c_ctx_create(integral_context, qs_env, potential, &
-                               bs_env%basis_set_AO, bs_env%basis_set_AO, bs_env%basis_set_RI)
-      END BLOCK
+      ! The optimizer trains against the SAME metric object the GW consumer
+      ! uses (bs_env%ri_metric, i.e. the input's CUTOFF_RADIUS_RI): a private
+      ! radius constant here silently diverges from the consumer whenever the
+      ! input changes the metric radius, so the grids would be optimized for a
+      ! metric that is never used downstream.
+      CALL gw_3c_ctx_create(integral_context, qs_env, bs_env%ri_metric, &
+                            bs_env%basis_set_AO, bs_env%basis_set_AO, bs_env%basis_set_RI)
+      IF (unit_nr > 0) THEN
+         WRITE (unit_nr, '(T2,A,T72,F7.1,A)') &
+            'Grid optimizer metric radius (= consumer CUTOFF_RADIUS_RI):', &
+            bs_env%ri_metric%cutoff_radius*angstrom, ' A'
+      END IF
       CALL build_local_clusters(integral_context, particle_set, cell, ao_size, ri_size, &
                                 bs_env%ri_rs%grid_opt%cutoff_atomic_cluster, para_env, clusters)
 
