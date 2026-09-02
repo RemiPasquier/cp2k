@@ -453,6 +453,9 @@ CONTAINS
 
       CALL section_vals_val_get(grid_opt_sec, "CUTOFF_ATOMIC_CLUSTER", r_val=grid_opt%cutoff_atomic_cluster)
       CALL section_vals_val_get(grid_opt_sec, "MAX_ITER", i_val=grid_opt%max_iter)
+      CALL section_vals_val_get(grid_opt_sec, "GRADIENT_CHECK", l_val=grid_opt%gradient_check)
+      CALL section_vals_val_get(grid_opt_sec, "ABORT_ON_NONCONVERGENCE", &
+                                l_val=grid_opt%abort_on_nonconvergence)
       CALL section_vals_val_get(grid_opt_sec, "N_POINT_PERCENTAGE", r_val=perc, explicit=perc_explicit)
       CALL section_vals_val_get(grid_opt_sec, "GRID_SIZE", n_rep_val=ngrid)
 

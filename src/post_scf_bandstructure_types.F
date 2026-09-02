@@ -78,6 +78,8 @@ MODULE post_scf_bandstructure_types
       LOGICAL                                          :: enabled = .FALSE.
       REAL(KIND=dp)                                    :: cutoff_atomic_cluster = 3.0_dp/angstrom
       INTEGER                                          :: max_iter = 100
+      LOGICAL                                          :: gradient_check = .FALSE.
+      LOGICAL                                          :: abort_on_nonconvergence = .FALSE.
       CHARACTER(LEN=2), ALLOCATABLE                    :: grid_elements(:)
       INTEGER, ALLOCATABLE                             :: grid_npoints(:)
    END TYPE ri_rs_grid_opt_type

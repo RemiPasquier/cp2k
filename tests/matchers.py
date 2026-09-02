@@ -408,6 +408,12 @@ registry["RIRS_CUTOFF"] = GenericMatcher(
 registry["RIRS_Grid_Optimization_Error"] = GenericMatcher(
     r"Normalized 3C error:", col=4
 )
+registry["RIRS_Grid_Optimization_Status"] = GenericMatcher(
+    r"RI-RS grid optimization termination status code:", col=7
+)
+registry["RIRS_Grid_Gradient_Check_Failures"] = GenericMatcher(
+    r"FD gradient check, components beyond tolerance:", col=7
+)
 registry["E_RIRS_HOMO"] = GenericMatcher(r"G0W0 valence band maximum", col=6)
 registry["E_RIRS_LUMO"] = GenericMatcher(r"G0W0 conduction band minimum", col=6)
 

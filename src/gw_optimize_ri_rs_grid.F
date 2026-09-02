@@ -23,7 +23,8 @@ MODULE gw_optimize_ri_rs_grid
                                               gw_3c_ws_create,&
                                               gw_3c_ws_release,&
                                               gw_3c_ws_type
-   USE kinds,                           ONLY: dp
+   USE kinds,                           ONLY: default_string_length,&
+                                              dp
    USE message_passing,                 ONLY: mp_para_env_type
    USE particle_types,                  ONLY: particle_type
    USE physcon,                         ONLY: angstrom
@@ -38,6 +39,14 @@ MODULE gw_optimize_ri_rs_grid
 
    CHARACTER(len=*), PARAMETER, PRIVATE :: moduleN = 'gw_optimize_ri_rs_grid'
    REAL(KIND=dp), PARAMETER, PRIVATE :: optimizer_accuracy = 1.0E-9_dp
+   ! termination status codes of optimize_grid_coordinates (printed; matched by regtests)
+   INTEGER, PARAMETER, PRIVATE :: grid_opt_status_converged = 0, &
+                                  grid_opt_status_max_iter = 1, &
+                                  grid_opt_status_eval_failed = 2, &
+                                  grid_opt_status_abnormal = 3
+   ! finite-difference gradient check parameters
+   INTEGER, PARAMETER, PRIVATE :: fd_check_n_probe = 6
+   REAL(KIND=dp), PARAMETER, PRIVATE :: fd_check_step = 1.0E-4_dp, fd_check_rel_tol = 1.0E-2_dp
 
    TYPE :: local_cluster_type
       INTEGER, ALLOCATABLE                 :: atoms(:)
@@ -61,6 +70,12 @@ CONTAINS
 
       INTEGER                                            :: handle, iatom, ikind, n_variable, &
                                                             periodic(3), unit_nr
+      CHARACTER(LEN=60)                                  :: terminal_task
+      CHARACTER(LEN=default_string_length)               :: status_text
+      INTEGER                                            :: n_evaluations, n_fd_failed, &
+                                                            n_iterations, opt_status
+      LOGICAL                                            :: restored_best
+      REAL(KIND=dp)                                      :: best_value, projected_gradient_norm
       INTEGER, ALLOCATABLE                               :: ao_size(:), grid_offsets(:), ri_size(:)
       LOGICAL                                            :: successful
       REAL(KIND=dp)                                      :: f, maximum_absolute_error
@@ -137,17 +152,69 @@ CONTAINS
       CALL pack_atom_grids(bs_env%ri_rs%grid_cache, grid_offsets, x)
       lower(:) = x - 100.0_dp/angstrom
       upper(:) = x + 100.0_dp/angstrom
+      IF (bs_env%ri_rs%grid_opt%gradient_check) THEN
+         CALL check_gradient_by_finite_differences(x, bs_env, clusters, grid_offsets, &
+                                                   unit_nr, n_fd_failed)
+         IF (n_fd_failed > 0) THEN
+            WRITE (status_text, '(I0)') n_fd_failed
+            CALL cp_abort(__LOCATION__, "RI-RS grid optimization: the analytic gradient "// &
+                          "deviates from finite differences beyond tolerance on "// &
+                          TRIM(status_text)//" checked components (see the table above)")
+         END IF
+      END IF
       CALL optimize_grid_coordinates(x, lower, upper, optimizer_accuracy, &
-                                     bs_env%ri_rs%grid_opt%max_iter, bs_env, clusters, grid_offsets)
+                                     bs_env%ri_rs%grid_opt%max_iter, bs_env, clusters, grid_offsets, &
+                                     opt_status, n_evaluations, n_iterations, &
+                                     projected_gradient_norm, best_value, restored_best, terminal_task)
       CALL grid_objective(x, bs_env, clusters, grid_offsets, f, g, &
                           maximum_absolute_error, successful)
       IF (.NOT. successful) CPABORT("RI-RS grid optimization produced no regularized fit")
 
+      SELECT CASE (opt_status)
+      CASE (grid_opt_status_converged)
+         IF (terminal_task(1:17) == 'CONVERGENCE: NORM') THEN
+            status_text = "converged (projected gradient norm below threshold)"
+         ELSE
+            ! factr = 0: only a zero-progress step triggers this L-BFGS-B branch
+            status_text = "stopped without objective progress: "//TRIM(terminal_task)
+         END IF
+      CASE (grid_opt_status_max_iter)
+         status_text = "MAX_ITER objective evaluations exhausted before convergence"
+      CASE (grid_opt_status_eval_failed)
+         status_text = "an objective evaluation failed (no regularized fit)"
+      CASE DEFAULT
+         status_text = "L-BFGS-B terminated abnormally: "//TRIM(terminal_task)
+      END SELECT
       IF (unit_nr > 0) THEN
          WRITE (unit_nr, '(/,T2,A)') 'RI-RS grid optimization terminated'
+         WRITE (unit_nr, '(T2,A,T72,I9)') &
+            'RI-RS grid optimization termination status code:', opt_status
+         WRITE (unit_nr, '(T2,A,1X,A)') 'Termination reason:', TRIM(status_text)
+         WRITE (unit_nr, '(T2,A,T72,I9)') 'Objective evaluations used:', n_evaluations
+         WRITE (unit_nr, '(T2,A,T72,I9)') 'L-BFGS-B iterations:', n_iterations
+         WRITE (unit_nr, '(T2,A,T72,ES9.1)') &
+            'Projected gradient norm (inf) at exit:', projected_gradient_norm
+         WRITE (unit_nr, '(T2,A,T72,ES9.1)') 'Convergence threshold:', optimizer_accuracy
+         WRITE (unit_nr, '(T2,A,T72,ES9.1)') 'Best objective value:', best_value
+         IF (restored_best) THEN
+            WRITE (unit_nr, '(T2,A)') &
+               'Returned grid is an earlier best iterate, not the final L-BFGS-B point'
+         END IF
          WRITE (unit_nr, '(T2,A,T72,ES9.1)') 'Normalized 3C error:', f
          WRITE (unit_nr, '(T2,A,T72,ES9.1)') &
             'Maximum absolute 3C error:', maximum_absolute_error
+      END IF
+      IF (opt_status /= grid_opt_status_converged) THEN
+         IF (bs_env%ri_rs%grid_opt%abort_on_nonconvergence) THEN
+            CALL cp_abort(__LOCATION__, "RI-RS grid optimization did not converge: "// &
+                          TRIM(status_text)//". Raise MAX_ITER, or set "// &
+                          "GRID_OPTIMIZATION%ABORT_ON_NONCONVERGENCE F to continue with "// &
+                          "the best grid found.")
+         ELSE
+            CALL cp_warn(__LOCATION__, "RI-RS grid optimization did not converge: "// &
+                         TRIM(status_text)//". Continuing with the best grid found; set "// &
+                         "GRID_OPTIMIZATION%ABORT_ON_NONCONVERGENCE T to make this fatal.")
+         END IF
       END IF
 
       DO iatom = 1, SIZE(bs_env%ri_rs%grid_cache)
@@ -244,9 +311,18 @@ CONTAINS
 !> \param bs_env GW environment containing RI-RS configuration and grid data.
 !> \param clusters Rank-local clusters and their exact three-centre integrals.
 !> \param grid_offsets Starting coordinate offset for each atom.
+!> \param status Termination status (grid_opt_status_* codes).
+!> \param n_evaluations Objective-and-gradient evaluations performed.
+!> \param n_iterations L-BFGS-B iterations completed.
+!> \param projected_gradient_norm Infinity norm of the projected gradient at exit.
+!> \param best_value Lowest objective value encountered.
+!> \param restored_best Whether x was reset to an earlier iterate (not the exit point).
+!> \param terminal_task The L-BFGS-B task string at exit.
 ! **************************************************************************************************
    SUBROUTINE optimize_grid_coordinates(x, lower, upper, accuracy, max_evaluations, &
-                                        bs_env, clusters, grid_offsets)
+                                        bs_env, clusters, grid_offsets, status, n_evaluations, &
+                                        n_iterations, projected_gradient_norm, best_value, &
+                                        restored_best, terminal_task)
       REAL(KIND=dp), DIMENSION(:), INTENT(INOUT)         :: x
       REAL(KIND=dp), DIMENSION(:), INTENT(IN)            :: lower, upper
       REAL(KIND=dp), INTENT(IN)                          :: accuracy
@@ -254,6 +330,10 @@ CONTAINS
       TYPE(post_scf_bandstructure_type), POINTER         :: bs_env
       TYPE(local_cluster_type), DIMENSION(:), INTENT(IN) :: clusters
       INTEGER, DIMENSION(:), INTENT(IN)                  :: grid_offsets
+      INTEGER, INTENT(OUT)                               :: status, n_evaluations, n_iterations
+      REAL(KIND=dp), INTENT(OUT)                         :: projected_gradient_norm, best_value
+      LOGICAL, INTENT(OUT)                               :: restored_best
+      CHARACTER(LEN=60), INTENT(OUT)                     :: terminal_task
 
       INTEGER, PARAMETER                                 :: memory = 7
 
@@ -290,15 +370,23 @@ CONTAINS
       best_f = HUGE(best_f)
       best_x = x
 
+      status = grid_opt_status_abnormal
+
       DO
          CALL setulb(SIZE(x), memory, x, lower, upper, bound_type, f, g, &
                      0.0_dp, accuracy, wa, iwa, task, -1, csave, lsave, isave, dsave, -1.0_dp)
          IF (task(1:2) == 'FG') THEN
-            IF (evaluations >= max_evaluations) EXIT
+            IF (evaluations >= max_evaluations) THEN
+               status = grid_opt_status_max_iter
+               EXIT
+            END IF
             CALL grid_objective(x, bs_env, clusters, grid_offsets, f, g, &
                                 maximum_absolute_error, evaluation_ok)
             evaluations = evaluations + 1
-            IF (.NOT. evaluation_ok) EXIT
+            IF (.NOT. evaluation_ok) THEN
+               status = grid_opt_status_eval_failed
+               EXIT
+            END IF
             IF (.NOT. have_best .OR. f < best_f) THEN
                have_best = .TRUE.
                best_f = f
@@ -306,12 +394,98 @@ CONTAINS
             END IF
          ELSE IF (task(1:5) == 'NEW_X') THEN
             CYCLE
+         ELSE IF (task(1:4) == 'CONV') THEN
+            status = grid_opt_status_converged
+            EXIT
          ELSE
+            status = grid_opt_status_abnormal
             EXIT
          END IF
       END DO
-      IF (have_best) x = best_x
+      terminal_task = task
+      n_evaluations = evaluations
+      n_iterations = isave(30)
+      projected_gradient_norm = dsave(13)
+      best_value = best_f
+      restored_best = .FALSE.
+      IF (have_best) THEN
+         restored_best = ANY(x /= best_x)
+         x = best_x
+      END IF
    END SUBROUTINE optimize_grid_coordinates
+
+! **************************************************************************************************
+!> \brief Compare the analytic objective gradient with central finite differences on a fixed
+!>        set of coordinates (first, last, and evenly spaced in between) and print the table.
+!> \param x Flattened atom-relative grid coordinates (unchanged on return; the grid cache is
+!>        left at x).
+!> \param bs_env GW environment containing RI-RS configuration and grid data.
+!> \param clusters Rank-local clusters and their exact three-centre integrals.
+!> \param grid_offsets Starting coordinate offset for each atom.
+!> \param unit_nr Output unit (rank 0) or a non-positive value.
+!> \param n_failed Number of checked components whose relative deviation exceeds the tolerance.
+! **************************************************************************************************
+   SUBROUTINE check_gradient_by_finite_differences(x, bs_env, clusters, grid_offsets, unit_nr, &
+                                                   n_failed)
+      REAL(KIND=dp), DIMENSION(:), INTENT(IN)            :: x
+      TYPE(post_scf_bandstructure_type), POINTER         :: bs_env
+      TYPE(local_cluster_type), DIMENSION(:), INTENT(IN) :: clusters
+      INTEGER, DIMENSION(:), INTENT(IN)                  :: grid_offsets
+      INTEGER, INTENT(IN)                                :: unit_nr
+      INTEGER, INTENT(OUT)                               :: n_failed
+
+      INTEGER                                            :: i, k, n
+      INTEGER, DIMENSION(fd_check_n_probe)               :: probe
+      LOGICAL                                            :: ok
+      REAL(KIND=dp)                                      :: deviation, f0, fd, floor, fm, fp, &
+                                                            max_err, rel
+      REAL(KIND=dp), DIMENSION(SIZE(x))                  :: g0, gdum, xp
+
+      n = SIZE(x)
+      CPASSERT(n > 0)
+      CALL grid_objective(x, bs_env, clusters, grid_offsets, f0, g0, max_err, ok)
+      IF (.NOT. ok) CPABORT("FD gradient check: objective failed at the initial grid")
+      floor = MAX(1.0E-12_dp, 1.0E-6_dp*MAXVAL(ABS(g0)))
+      DO k = 1, fd_check_n_probe
+         probe(k) = 1 + ((k - 1)*(n - 1))/(fd_check_n_probe - 1)
+      END DO
+      n_failed = 0
+      IF (unit_nr > 0) THEN
+         WRITE (unit_nr, '(/,T2,A,ES9.1,A)') &
+            'FD gradient check of the RI-RS grid objective (central differences, step ', &
+            fd_check_step, ' bohr)'
+         WRITE (unit_nr, '(T2,A,T72,ES9.1)') 'Objective at the initial grid:', f0
+         WRITE (unit_nr, '(T2,A10,A16,A16,A16,A12)') &
+            'component', 'analytic', 'finite diff', 'abs dev', 'rel dev'
+      END IF
+      DO k = 1, fd_check_n_probe
+         i = probe(k)
+         IF (k > 1) THEN
+            IF (i == probe(k - 1)) CYCLE
+         END IF
+         xp = x
+         xp(i) = x(i) + fd_check_step
+         CALL grid_objective(xp, bs_env, clusters, grid_offsets, fp, gdum, max_err, ok)
+         IF (.NOT. ok) CPABORT("FD gradient check: objective failed at x+h")
+         xp(i) = x(i) - fd_check_step
+         CALL grid_objective(xp, bs_env, clusters, grid_offsets, fm, gdum, max_err, ok)
+         IF (.NOT. ok) CPABORT("FD gradient check: objective failed at x-h")
+         fd = (fp - fm)/(2.0_dp*fd_check_step)
+         deviation = ABS(fd - g0(i))
+         rel = deviation/MAX(ABS(g0(i)), ABS(fd), floor)
+         IF (rel > fd_check_rel_tol) n_failed = n_failed + 1
+         IF (unit_nr > 0) THEN
+            WRITE (unit_nr, '(T2,I10,ES16.6,ES16.6,ES16.6,ES12.2)') i, g0(i), fd, deviation, rel
+         END IF
+      END DO
+      IF (unit_nr > 0) THEN
+         WRITE (unit_nr, '(T2,A,T72,I9)') &
+            'FD gradient check, components beyond tolerance:', n_failed
+         FLUSH (unit_nr)
+      END IF
+      ! leave the shared grid cache at the unperturbed coordinates
+      CALL unpack_atom_grids(x, bs_env%ri_rs%grid_cache, grid_offsets)
+   END SUBROUTINE check_gradient_by_finite_differences
 
 ! **************************************************************************************************
 !> \brief Build local clusters and precompute exact (mu nu|P) values on their owning rank.

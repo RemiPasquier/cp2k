@@ -2824,6 +2824,27 @@ CONTAINS
       CALL section_add_keyword(section, keyword)
       CALL keyword_release(keyword)
 
+      CALL keyword_create( &
+         keyword, __LOCATION__, name="ABORT_ON_NONCONVERGENCE", &
+         description="Abort the calculation when the grid optimization does not reach its "// &
+         "projected-gradient convergence threshold (MAX_ITER exhausted, an objective "// &
+         "evaluation failed, or the optimizer terminated abnormally). With the default, a "// &
+         "warning is issued and the best grid found so far is used. The termination status "// &
+         "is always printed.", &
+         usage="ABORT_ON_NONCONVERGENCE T", default_l_val=.FALSE., lone_keyword_l_val=.TRUE.)
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+
+      CALL keyword_create( &
+         keyword, __LOCATION__, name="GRADIENT_CHECK", &
+         description="Before the optimization, compare the analytic gradient of the fitting "// &
+         "objective with central finite differences (step 1.0E-4 bohr) for a fixed set of six "// &
+         "grid coordinates and print the comparison. A relative deviation above 1 percent on any "// &
+         "checked component aborts the calculation. Intended for testing the implementation.", &
+         usage="GRADIENT_CHECK T", default_l_val=.FALSE., lone_keyword_l_val=.TRUE.)
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+
    END SUBROUTINE create_ri_rs_grid_optimization_section
 
 ! **************************************************************************************************
