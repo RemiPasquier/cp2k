@@ -414,6 +414,9 @@ registry["RIRS_Grid_Optimization_Status"] = GenericMatcher(
 registry["RIRS_Grid_Gradient_Check_Failures"] = GenericMatcher(
     r"FD gradient check, components beyond tolerance:", col=7
 )
+# number of atom sections written into the single GRID_OPTIMIZATION%GRID_DUMP file:
+# "RI-RS grid dump written: <n> atom sections, file <name>" -> <n> is token 5
+registry["RIRS_Grid_Dump_Atoms"] = GenericMatcher(r"RI-RS grid dump written:", col=5)
 registry["E_RIRS_HOMO"] = GenericMatcher(r"G0W0 valence band maximum", col=6)
 registry["E_RIRS_LUMO"] = GenericMatcher(r"G0W0 conduction band minimum", col=6)
 

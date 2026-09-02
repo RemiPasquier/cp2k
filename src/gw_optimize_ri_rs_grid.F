@@ -23,7 +23,8 @@ MODULE gw_optimize_ri_rs_grid
                                               gw_3c_ws_create,&
                                               gw_3c_ws_release,&
                                               gw_3c_ws_type
-   USE kinds,                           ONLY: default_string_length,&
+   USE kinds,                           ONLY: default_path_length,&
+                                              default_string_length,&
                                               dp
    USE message_passing,                 ONLY: mp_para_env_type
    USE particle_types,                  ONLY: particle_type
@@ -68,17 +69,14 @@ CONTAINS
 
       CHARACTER(len=*), PARAMETER :: routineN = 'optimize_ri_rs_grid'
 
-      INTEGER                                            :: handle, iatom, ikind, n_variable, &
-                                                            periodic(3), unit_nr
       CHARACTER(LEN=60)                                  :: terminal_task
-      CHARACTER(LEN=default_string_length)               :: status_text
-      INTEGER                                            :: n_evaluations, n_fd_failed, &
-                                                            n_iterations, opt_status
-      LOGICAL                                            :: restored_best
-      REAL(KIND=dp)                                      :: best_value, projected_gradient_norm
+      CHARACTER(LEN=default_path_length)                 :: status_text
+      INTEGER :: handle, iatom, ikind, n_dump_atoms, n_evaluations, n_fd_failed, n_iterations, &
+         n_variable, opt_status, periodic(3), unit_nr
       INTEGER, ALLOCATABLE                               :: ao_size(:), grid_offsets(:), ri_size(:)
-      LOGICAL                                            :: successful
-      REAL(KIND=dp)                                      :: f, maximum_absolute_error
+      LOGICAL                                            :: restored_best, successful
+      REAL(KIND=dp)                                      :: best_value, f, maximum_absolute_error, &
+                                                            projected_gradient_norm
       REAL(KIND=dp), ALLOCATABLE                         :: g(:), lower(:), upper(:), x(:)
       TYPE(cell_type), POINTER                           :: cell
       TYPE(gw_3c_ctx_type)                               :: integral_context
@@ -221,6 +219,19 @@ CONTAINS
          bs_env%ri_rs%grid_cache(iatom)%npts = &
             SIZE(bs_env%ri_rs%grid_cache(iatom)%raw_points, 2)
       END DO
+      ! Provenance dump of the returned grids: the cache holds the grid returned by the
+      ! optimizer (unpacked by the final grid_objective call above), i.e. what GW consumes.
+      IF (LEN_TRIM(bs_env%ri_rs%grid_opt%grid_dump) > 0) THEN
+         n_dump_atoms = 0
+         IF (para_env%is_source()) THEN
+            CALL dump_atom_grids(bs_env, particle_set, opt_status, n_evaluations, best_value, &
+                                 n_dump_atoms)
+         END IF
+         IF (unit_nr > 0) THEN
+            WRITE (unit_nr, '(T2,A,1X,I0,1X,A,1X,A)') 'RI-RS grid dump written:', n_dump_atoms, &
+               'atom sections, file', TRIM(bs_env%ri_rs%grid_opt%grid_dump)
+         END IF
+      END IF
       IF (unit_nr > 0) FLUSH (unit_nr)
 
       bs_env%ri_rs%Z_lP_exists = .FALSE.
@@ -228,6 +239,120 @@ CONTAINS
       CALL timestop(handle)
 
    END SUBROUTINE optimize_ri_rs_grid
+
+! **************************************************************************************************
+!> \brief Write the optimized per-atom grids to ONE provenance file. Call on rank 0 only.
+!>        This is for INSPECTION of what the optimizer produced; it is deliberately not a loadable
+!>        RI-RS grid file. build_grid_cache reads per-ELEMENT .ion files and expands them into
+!>        independent per-atom copies internally, so a per-atom dump could not be read back anyway.
+!>        The per-atom sections therefore key their size on 'n grid points', which the .ion
+!>        header parser (read_rirs_grid_header binds to the first 'n points' field) does not
+!>        accept, so renaming a dump into the grid directory fails closed instead of silently
+!>        loading the first atom's grid for every atom of that element.
+!>        A single file with one section per atom therefore costs nothing in usability and avoids
+!>        emitting one small file per atom, which does not scale to large molecules (and is the
+!>        pathological small-file pattern on Lustre-style parallel filesystems).
+!> \param bs_env GW environment holding the optimized grid cache and the RI-RS input settings.
+!> \param particle_set Atoms of the structure (element symbols for the per-atom sections).
+!> \param opt_status Optimizer termination status code (grid_opt_status_* codes).
+!> \param n_evaluations Objective-and-gradient evaluations used by the optimizer.
+!> \param best_value Best objective value reached by the optimizer.
+!> \param n_atoms_written Number of atom sections written.
+! **************************************************************************************************
+   SUBROUTINE dump_atom_grids(bs_env, particle_set, opt_status, n_evaluations, best_value, &
+                              n_atoms_written)
+      TYPE(post_scf_bandstructure_type), POINTER         :: bs_env
+      TYPE(particle_type), DIMENSION(:), POINTER         :: particle_set
+      INTEGER, INTENT(IN)                                :: opt_status, n_evaluations
+      REAL(KIND=dp), INTENT(IN)                          :: best_value
+      INTEGER, INTENT(OUT)                               :: n_atoms_written
+
+      CHARACTER(len=*), PARAMETER                        :: routineN = 'dump_atom_grids'
+      INTEGER, PARAMETER                                 :: n_preamble = 12
+
+      CHARACTER(LEN=2)                                   :: element
+      CHARACTER(LEN=default_path_length)                 :: fname
+      CHARACTER(LEN=default_string_length)               :: preamble(n_preamble)
+      INTEGER                                            :: handle, iatom, iline, ios, ipt, iunit, &
+                                                            natom, npts
+
+      CALL timeset(routineN, handle)
+      CPASSERT(ALLOCATED(bs_env%ri_rs%grid_cache))
+      CPASSERT(SIZE(bs_env%ri_rs%grid_cache) == SIZE(particle_set))
+      CPASSERT(LEN_TRIM(bs_env%ri_rs%grid_opt%grid_dump) > 0)
+
+      natom = SIZE(bs_env%ri_rs%grid_cache)
+      fname = TRIM(bs_env%ri_rs%grid_opt%grid_dump)
+      n_atoms_written = 0
+
+      ! Run-level metadata, written once instead of being repeated for every atom.
+      preamble(1) = 'RI-RS grid optimization dump (gw_optimize_ri_rs_grid.F)'
+      preamble(2) = 'content : the optimized grids GW consumed, one section per atom'
+      preamble(3) = 'note : provenance/inspection only, NOT a loadable RI-RS grid file'
+      WRITE (preamble(4), '(A,I0)') 'n atoms : ', natom
+      preamble(5) = 'units : Bohr'
+      preamble(6) = 'coordinates : atom-relative (origin at the atom)'
+      WRITE (preamble(7), '(A,I0)') 'optimizer termination status code : ', opt_status
+      WRITE (preamble(8), '(A,I0)') 'objective evaluations : ', n_evaluations
+      WRITE (preamble(9), '(A,ES16.8)') 'best objective value : ', best_value
+      WRITE (preamble(10), '(A,F10.4)') 'training metric radius [angstrom] : ', &
+         bs_env%ri_metric%cutoff_radius*angstrom
+      WRITE (preamble(11), '(A,I0)') 'source grid_select : ', bs_env%ri_rs%grid_select
+      IF (LEN_TRIM(bs_env%ri_rs%grid_file_suffix) > 0) THEN
+         preamble(12) = 'source grid_file_suffix : '//TRIM(bs_env%ri_rs%grid_file_suffix)
+      ELSE
+         preamble(12) = 'source grid_file_suffix : (none)'
+      END IF
+
+      OPEN (NEWUNIT=iunit, FILE=TRIM(fname), STATUS='REPLACE', ACTION='WRITE', &
+            FORM='FORMATTED', IOSTAT=ios)
+      IF (ios /= 0) THEN
+         CALL cp_abort(__LOCATION__, "RI-RS grid dump: cannot open file "// &
+                       TRIM(fname)//" for writing")
+      END IF
+
+      WRITE (iunit, '(A)', IOSTAT=ios) '<rirs_grid_dump>'
+      IF (ios == 0) WRITE (iunit, '(A)', IOSTAT=ios) '<preamble>'
+      DO iline = 1, n_preamble
+         IF (ios /= 0) EXIT
+         WRITE (iunit, '(A)', IOSTAT=ios) TRIM(preamble(iline))
+      END DO
+      IF (ios == 0) WRITE (iunit, '(A)', IOSTAT=ios) '</preamble>'
+
+      DO iatom = 1, natom
+         IF (ios /= 0) EXIT
+         CPASSERT(ASSOCIATED(particle_set(iatom)%atomic_kind))
+         element = ADJUSTL(particle_set(iatom)%atomic_kind%element_symbol)
+         npts = SIZE(bs_env%ri_rs%grid_cache(iatom)%raw_points, 2)
+         WRITE (iunit, '(A)', IOSTAT=ios) '<atom>'
+         IF (ios == 0) WRITE (iunit, '(A,I0)', IOSTAT=ios) 'index : ', iatom
+         IF (ios == 0) WRITE (iunit, '(A,A)', IOSTAT=ios) 'element : ', TRIM(element)
+         IF (ios == 0) WRITE (iunit, '(A,I0)', IOSTAT=ios) 'n grid points : ', npts
+         IF (ios == 0) WRITE (iunit, '(A)', IOSTAT=ios) '<grid_points>'
+         DO ipt = 1, npts
+            IF (ios /= 0) EXIT
+            WRITE (iunit, '(3ES23.15)', IOSTAT=ios) &
+               bs_env%ri_rs%grid_cache(iatom)%raw_points(1:3, ipt)
+         END DO
+         IF (ios == 0) WRITE (iunit, '(A)', IOSTAT=ios) '</grid_points>'
+         IF (ios == 0) WRITE (iunit, '(A)', IOSTAT=ios) '</atom>'
+         IF (ios == 0) n_atoms_written = n_atoms_written + 1
+      END DO
+      IF (ios == 0) WRITE (iunit, '(A)', IOSTAT=ios) '</rirs_grid_dump>'
+
+      IF (ios /= 0) THEN
+         CALL cp_abort(__LOCATION__, "RI-RS grid dump: I/O error while writing file "// &
+                       TRIM(fname))
+      END IF
+      CLOSE (iunit, IOSTAT=ios)
+      IF (ios /= 0) THEN
+         CALL cp_abort(__LOCATION__, "RI-RS grid dump: I/O error while closing file "// &
+                       TRIM(fname))
+      END IF
+
+      CALL timestop(handle)
+
+   END SUBROUTINE dump_atom_grids
 
 ! **************************************************************************************************
 !> \brief Evaluate the regularized three-centre-integral fitting error.

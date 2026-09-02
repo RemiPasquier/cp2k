@@ -456,6 +456,7 @@ CONTAINS
       CALL section_vals_val_get(grid_opt_sec, "GRADIENT_CHECK", l_val=grid_opt%gradient_check)
       CALL section_vals_val_get(grid_opt_sec, "ABORT_ON_NONCONVERGENCE", &
                                 l_val=grid_opt%abort_on_nonconvergence)
+      CALL section_vals_val_get(grid_opt_sec, "GRID_DUMP", c_val=grid_opt%grid_dump)
       CALL section_vals_val_get(grid_opt_sec, "N_POINT_PERCENTAGE", r_val=perc, explicit=perc_explicit)
       CALL section_vals_val_get(grid_opt_sec, "GRID_SIZE", n_rep_val=ngrid)
 
@@ -1910,6 +1911,10 @@ CONTAINS
                WRITE (u, '(T2,A,T75,I6)') &
                   'Input: Maximum grid optimization iterations', &
                   bs_env%ri_rs%grid_opt%max_iter
+               IF (LEN_TRIM(bs_env%ri_rs%grid_opt%grid_dump) > 0) THEN
+                  WRITE (u, '(T2,A,1X,A)') 'Input: RI-RS grid dump file:', &
+                     TRIM(bs_env%ri_rs%grid_opt%grid_dump)
+               END IF
             END IF
             IF (bs_env%gw_flavour == evGW0) THEN
                WRITE (u, '(T2,A,I42)') 'Input: Maximum number of evGW0 cycles', &

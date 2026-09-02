@@ -2845,6 +2845,24 @@ CONTAINS
       CALL section_add_keyword(section, keyword)
       CALL keyword_release(keyword)
 
+      CALL keyword_create( &
+         keyword, __LOCATION__, name="GRID_DUMP", &
+         description="File name for a provenance dump of the optimized grids. When set, rank 0 "// &
+         "writes this single file after the optimization: a <preamble> block with the atom count, "// &
+         "units (Bohr), the optimizer termination status code, objective evaluations and best "// &
+         "objective value, the training metric radius and GRID_SELECT / GRID_FILE_SUFFIX of the "// &
+         "source grids, followed by one <atom> section per atom giving its index, element, number "// &
+         "of points and a <grid_points> block with the atom-relative coordinates in bohr exactly "// &
+         "as used by the subsequent GW calculation. The dump is for INSPECTION of the optimized "// &
+         "grids and is deliberately not a loadable grid file: RI-RS reads per-element .ion files "// &
+         "and expands them to independent per-atom copies internally, and the dump names its "// &
+         "per-atom size field so that the .ion reader rejects the dump rather than silently "// &
+         "loading the first atom grid for every atom of that element. An empty name (default) "// &
+         "disables the dump.", &
+         usage="GRID_DUMP my_grids.dump", default_lc_val="")
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+
    END SUBROUTINE create_ri_rs_grid_optimization_section
 
 ! **************************************************************************************************

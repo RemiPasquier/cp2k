@@ -80,6 +80,8 @@ MODULE post_scf_bandstructure_types
       INTEGER                                          :: max_iter = 100
       LOGICAL                                          :: gradient_check = .FALSE.
       LOGICAL                                          :: abort_on_nonconvergence = .FALSE.
+      ! file name of the optional single-file provenance dump of the optimized grids
+      CHARACTER(LEN=default_path_length)               :: grid_dump = ""
       CHARACTER(LEN=2), ALLOCATABLE                    :: grid_elements(:)
       INTEGER, ALLOCATABLE                             :: grid_npoints(:)
    END TYPE ri_rs_grid_opt_type
