@@ -411,6 +411,9 @@ registry["RIRS_Grid_Optimization_Error"] = GenericMatcher(
 registry["RIRS_Grid_Optimization_Status"] = GenericMatcher(
     r"RI-RS grid optimization termination status code:", col=7
 )
+registry["RIRS_Grid_Optimization_Criterion"] = GenericMatcher(
+    r"RI-RS grid optimization convergence criterion code:", col=7
+)
 registry["RIRS_Grid_Gradient_Check_Failures"] = GenericMatcher(
     r"FD gradient check, components beyond tolerance:", col=7
 )

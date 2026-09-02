@@ -453,6 +453,8 @@ CONTAINS
 
       CALL section_vals_val_get(grid_opt_sec, "CUTOFF_ATOMIC_CLUSTER", r_val=grid_opt%cutoff_atomic_cluster)
       CALL section_vals_val_get(grid_opt_sec, "MAX_ITER", i_val=grid_opt%max_iter)
+      CALL section_vals_val_get(grid_opt_sec, "CONVERGENCE_WINDOW", i_val=grid_opt%convergence_window)
+      CALL section_vals_val_get(grid_opt_sec, "REL_PROGRESS_TOL", r_val=grid_opt%rel_progress_tol)
       CALL section_vals_val_get(grid_opt_sec, "GRADIENT_CHECK", l_val=grid_opt%gradient_check)
       CALL section_vals_val_get(grid_opt_sec, "ABORT_ON_NONCONVERGENCE", &
                                 l_val=grid_opt%abort_on_nonconvergence)
@@ -1909,8 +1911,14 @@ CONTAINS
                   'Input: Cutoff radius for atomic clusters', &
                   bs_env%ri_rs%grid_opt%cutoff_atomic_cluster*angstrom, ' Å'
                WRITE (u, '(T2,A,T75,I6)') &
-                  'Input: Maximum grid optimization iterations', &
+                  'Input: Maximum grid optimization objective evaluations', &
                   bs_env%ri_rs%grid_opt%max_iter
+               WRITE (u, '(T2,A,T75,I6)') &
+                  'Input: Grid optimization convergence window (evaluations)', &
+                  bs_env%ri_rs%grid_opt%convergence_window
+               WRITE (u, '(T2,A,T72,ES9.1)') &
+                  'Input: Grid optimization relative progress tolerance', &
+                  bs_env%ri_rs%grid_opt%rel_progress_tol
                IF (LEN_TRIM(bs_env%ri_rs%grid_opt%grid_dump) > 0) THEN
                   WRITE (u, '(T2,A,1X,A)') 'Input: RI-RS grid dump file:', &
                      TRIM(bs_env%ri_rs%grid_opt%grid_dump)

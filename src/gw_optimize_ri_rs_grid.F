@@ -71,12 +71,13 @@ CONTAINS
 
       CHARACTER(LEN=60)                                  :: terminal_task
       CHARACTER(LEN=default_path_length)                 :: status_text
-      INTEGER :: handle, iatom, ikind, n_dump_atoms, n_evaluations, n_fd_failed, n_iterations, &
-         n_variable, opt_status, periodic(3), unit_nr
+      INTEGER :: convergence_criterion, handle, iatom, ikind, n_dump_atoms, n_evaluations, &
+         n_fd_failed, n_iterations, n_variable, opt_status, periodic(3), unit_nr
       INTEGER, ALLOCATABLE                               :: ao_size(:), grid_offsets(:), ri_size(:)
       LOGICAL                                            :: restored_best, successful
       REAL(KIND=dp)                                      :: best_value, f, maximum_absolute_error, &
-                                                            projected_gradient_norm
+                                                            projected_gradient_norm, &
+                                                            window_progress
       REAL(KIND=dp), ALLOCATABLE                         :: g(:), lower(:), upper(:), x(:)
       TYPE(cell_type), POINTER                           :: cell
       TYPE(gw_3c_ctx_type)                               :: integral_context
@@ -98,6 +99,12 @@ CONTAINS
 
       IF (bs_env%ri_rs%grid_opt%max_iter < 1) THEN
          CPABORT("GRID_OPTIMIZATION%MAX_ITER must be positive")
+      END IF
+      IF (bs_env%ri_rs%grid_opt%convergence_window < 1) THEN
+         CPABORT("GRID_OPTIMIZATION%CONVERGENCE_WINDOW must be positive")
+      END IF
+      IF (bs_env%ri_rs%grid_opt%rel_progress_tol < 0.0_dp .OR. bs_env%ri_rs%grid_opt%rel_progress_tol > 1.0_dp) THEN
+         CPABORT("GRID_OPTIMIZATION%REL_PROGRESS_TOL must lie in [0, 1]")
       END IF
       IF (bs_env%ri_rs%grid_opt%cutoff_atomic_cluster <= 0.0_dp) THEN
          CPABORT("GRID_OPTIMIZATION%CUTOFF_ATOMIC_CLUSTER must be positive")
@@ -160,20 +167,37 @@ CONTAINS
                           TRIM(status_text)//" checked components (see the table above)")
          END IF
       END IF
+      IF (unit_nr > 0 .AND. bs_env%ri_rs%grid_opt%max_iter <= bs_env%ri_rs%grid_opt%convergence_window) THEN
+         WRITE (unit_nr, '(T2,A)') 'Note: MAX_ITER does not exceed CONVERGENCE_WINDOW, '// &
+            'the relative-progress convergence criterion cannot trigger'
+      END IF
       CALL optimize_grid_coordinates(x, lower, upper, optimizer_accuracy, &
-                                     bs_env%ri_rs%grid_opt%max_iter, bs_env, clusters, grid_offsets, &
+                                     bs_env%ri_rs%grid_opt%max_iter, &
+                                     bs_env%ri_rs%grid_opt%convergence_window, &
+                                     bs_env%ri_rs%grid_opt%rel_progress_tol, &
+                                     bs_env, clusters, grid_offsets, &
                                      opt_status, n_evaluations, n_iterations, &
-                                     projected_gradient_norm, best_value, restored_best, terminal_task)
+                                     projected_gradient_norm, best_value, restored_best, window_progress, &
+                                     terminal_task)
       CALL grid_objective(x, bs_env, clusters, grid_offsets, f, g, &
                           maximum_absolute_error, successful)
       IF (.NOT. successful) CPABORT("RI-RS grid optimization produced no regularized fit")
 
+      ! convergence criterion code: 0 none, 1 projected gradient, 2 relative progress,
+      ! 3 zero-progress step reported by L-BFGS-B
+      convergence_criterion = 0
       SELECT CASE (opt_status)
       CASE (grid_opt_status_converged)
          IF (terminal_task(1:17) == 'CONVERGENCE: NORM') THEN
+            convergence_criterion = 1
             status_text = "converged (projected gradient norm below threshold)"
+         ELSE IF (terminal_task(1:25) == 'CONVERGENCE: REL_PROGRESS') THEN
+            convergence_criterion = 2
+            status_text = "converged (best objective improved by less than REL_PROGRESS_TOL "// &
+                          "over the last CONVERGENCE_WINDOW evaluations)"
          ELSE
             ! factr = 0: only a zero-progress step triggers this L-BFGS-B branch
+            convergence_criterion = 3
             status_text = "stopped without objective progress: "//TRIM(terminal_task)
          END IF
       CASE (grid_opt_status_max_iter)
@@ -191,8 +215,18 @@ CONTAINS
          WRITE (unit_nr, '(T2,A,T72,I9)') 'Objective evaluations used:', n_evaluations
          WRITE (unit_nr, '(T2,A,T72,I9)') 'L-BFGS-B iterations:', n_iterations
          WRITE (unit_nr, '(T2,A,T72,ES9.1)') &
-            'Projected gradient norm (inf) at exit:', projected_gradient_norm
+            'Projected gradient norm (inf), last L-BFGS-B iterate:', projected_gradient_norm
          WRITE (unit_nr, '(T2,A,T72,ES9.1)') 'Convergence threshold:', optimizer_accuracy
+         WRITE (unit_nr, '(T2,A,T72,I9)') 'Convergence window (evaluations):', &
+            bs_env%ri_rs%grid_opt%convergence_window
+         WRITE (unit_nr, '(T2,A,T72,ES9.1)') 'Relative progress tolerance:', &
+            bs_env%ri_rs%grid_opt%rel_progress_tol
+         IF (window_progress >= 0.0_dp) THEN
+            WRITE (unit_nr, '(T2,A,T72,ES9.1)') &
+               'Relative objective progress over the last window:', window_progress
+         END IF
+         WRITE (unit_nr, '(T2,A,T72,I9)') &
+            'RI-RS grid optimization convergence criterion code:', convergence_criterion
          WRITE (unit_nr, '(T2,A,T72,ES9.1)') 'Best objective value:', best_value
          IF (restored_best) THEN
             WRITE (unit_nr, '(T2,A)') &
@@ -433,31 +467,41 @@ CONTAINS
 !> \param upper Upper bound for each coordinate.
 !> \param accuracy Projected-gradient convergence threshold.
 !> \param max_evaluations Maximum number of objective evaluations.
+!> \param convergence_window Number of evaluations over which relative progress is measured.
+!> \param rel_progress_tol Relative improvement of the best objective over the window below
+!>        which the optimization is converged (0 disables the criterion).
 !> \param bs_env GW environment containing RI-RS configuration and grid data.
 !> \param clusters Rank-local clusters and their exact three-centre integrals.
 !> \param grid_offsets Starting coordinate offset for each atom.
 !> \param status Termination status (grid_opt_status_* codes).
 !> \param n_evaluations Objective-and-gradient evaluations performed.
 !> \param n_iterations L-BFGS-B iterations completed.
-!> \param projected_gradient_norm Infinity norm of the projected gradient at exit.
+!> \param projected_gradient_norm Infinity norm of the projected gradient at the last accepted
+!>        L-BFGS-B iterate.
 !> \param best_value Lowest objective value encountered.
 !> \param restored_best Whether x was reset to an earlier iterate (not the exit point).
-!> \param terminal_task The L-BFGS-B task string at exit.
+!> \param window_progress Relative improvement of the best objective over the last
+!>        convergence_window evaluations at the final check (negative if never checked).
+!> \param terminal_task Termination task string; driver-defined for relative-progress convergence,
+!>        otherwise returned by L-BFGS-B.
 ! **************************************************************************************************
    SUBROUTINE optimize_grid_coordinates(x, lower, upper, accuracy, max_evaluations, &
+                                        convergence_window, rel_progress_tol, &
                                         bs_env, clusters, grid_offsets, status, n_evaluations, &
                                         n_iterations, projected_gradient_norm, best_value, &
-                                        restored_best, terminal_task)
+                                        restored_best, window_progress, terminal_task)
       REAL(KIND=dp), DIMENSION(:), INTENT(INOUT)         :: x
       REAL(KIND=dp), DIMENSION(:), INTENT(IN)            :: lower, upper
       REAL(KIND=dp), INTENT(IN)                          :: accuracy
-      INTEGER, INTENT(IN)                                :: max_evaluations
+      INTEGER, INTENT(IN)                                :: max_evaluations, convergence_window
+      REAL(KIND=dp), INTENT(IN)                          :: rel_progress_tol
       TYPE(post_scf_bandstructure_type), POINTER         :: bs_env
       TYPE(local_cluster_type), DIMENSION(:), INTENT(IN) :: clusters
       INTEGER, DIMENSION(:), INTENT(IN)                  :: grid_offsets
       INTEGER, INTENT(OUT)                               :: status, n_evaluations, n_iterations
       REAL(KIND=dp), INTENT(OUT)                         :: projected_gradient_norm, best_value
       LOGICAL, INTENT(OUT)                               :: restored_best
+      REAL(KIND=dp), INTENT(OUT)                         :: window_progress
       CHARACTER(LEN=60), INTENT(OUT)                     :: terminal_task
 
       INTEGER, PARAMETER                                 :: memory = 7
@@ -467,7 +511,9 @@ CONTAINS
       REAL(KIND=dp), DIMENSION(29)                       :: dsave
       REAL(KIND=dp), DIMENSION(2*memory*SIZE(x)+5*SIZE(x&
          )+11*memory**2+8*memory)                        :: wa
-      REAL(KIND=dp)                                      :: best_f, f, maximum_absolute_error
+      REAL(KIND=dp), ALLOCATABLE                         :: best_history(:)
+      REAL(KIND=dp)                                      :: best_f, f, f_reference, &
+                                                            maximum_absolute_error
       LOGICAL, DIMENSION(4)                              :: lsave
       LOGICAL                                            :: evaluation_ok, have_best
       INTEGER, DIMENSION(SIZE(x))                        :: bound_type
@@ -479,6 +525,13 @@ CONTAINS
       CPASSERT(ALL(SHAPE(lower) == SHAPE(x)) .AND. ALL(SHAPE(upper) == SHAPE(x)))
       CPASSERT(ALL(lower <= upper))
       CPASSERT(accuracy > 0.0_dp .AND. max_evaluations > 0)
+      CPASSERT(convergence_window > 0)
+      CPASSERT(rel_progress_tol >= 0.0_dp .AND. rel_progress_tol <= 1.0_dp)
+      ! ring buffer of the best objective after each evaluation, one slot per evaluation in the
+      ! window plus the current one
+      ALLOCATE (best_history(0:convergence_window))
+      best_history = HUGE(best_f)
+      window_progress = -1.0_dp
 
       bound_type = 2
       task = 'START'
@@ -516,6 +569,22 @@ CONTAINS
                have_best = .TRUE.
                best_f = f
                best_x = x
+            END IF
+            ! relative-progress criterion: the best objective after this evaluation against the
+            ! best objective convergence_window evaluations earlier
+            best_history(MOD(evaluations, convergence_window + 1)) = best_f
+            IF (evaluations > convergence_window) THEN
+               f_reference = best_history(MOD(evaluations - convergence_window, convergence_window + 1))
+               IF (f_reference > 0.0_dp) THEN
+                  window_progress = 1.0_dp - best_f/f_reference
+               ELSE
+                  window_progress = 0.0_dp
+               END IF
+               IF (best_f > (1.0_dp - rel_progress_tol)*f_reference) THEN
+                  status = grid_opt_status_converged
+                  task = 'CONVERGENCE: REL_PROGRESS_BELOW_TOL'
+                  EXIT
+               END IF
             END IF
          ELSE IF (task(1:5) == 'NEW_X') THEN
             CYCLE

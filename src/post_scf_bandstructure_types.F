@@ -78,6 +78,10 @@ MODULE post_scf_bandstructure_types
       LOGICAL                                          :: enabled = .FALSE.
       REAL(KIND=dp)                                    :: cutoff_atomic_cluster = 3.0_dp/angstrom
       INTEGER                                          :: max_iter = 100
+      ! relative-progress convergence: the optimization is converged once the best objective
+      ! improved by less than rel_progress_tol over the last convergence_window evaluations
+      INTEGER                                          :: convergence_window = 200
+      REAL(KIND=dp)                                    :: rel_progress_tol = 1.0E-2_dp
       LOGICAL                                          :: gradient_check = .FALSE.
       LOGICAL                                          :: abort_on_nonconvergence = .FALSE.
       ! file name of the optional single-file provenance dump of the optimized grids

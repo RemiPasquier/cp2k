@@ -44,6 +44,10 @@
 "rirs-grid-optimization-nonconvergence-H2O.inp" = [{matcher="RIRS_Grid", tol=1e-12, ref=41},
                                                    {matcher="RIRS_Grid_Optimization_Status", tol=1e-12, ref=1}]
 
+"rirs-grid-optimization-progress-H2O.inp" = [{matcher="RIRS_Grid", tol=1e-12, ref=41},
+                                             {matcher="RIRS_Grid_Optimization_Status", tol=1e-12, ref=0},
+                                             {matcher="RIRS_Grid_Optimization_Criterion", tol=1e-12, ref=2}]
+
 "rirs-grid-optimization-percentage-10-H2O.inp" = [{matcher="RIRS_Grid", tol=1e-12, ref=62},
                                                   {matcher="RIRS_Grid_Optimization_Error", tol=1e-1, ref=1.6e-4},
                                                   {matcher="E_RIRS_HOMO", tol=8e-4, ref=-6.218}]

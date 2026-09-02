@@ -2818,17 +2818,44 @@ CONTAINS
 
       CALL keyword_create( &
          keyword, __LOCATION__, name="MAX_ITER", &
-         description="Maximum number of objective-and-gradient evaluations in the single "// &
-         "cooperative Cartesian grid optimization.", &
+         description="Budget of objective-and-gradient evaluations for the single cooperative "// &
+         "Cartesian grid optimization. When the optimizer requests an evaluation beyond this "// &
+         "budget the optimization stops with status code 1 and the best grid found so far (see "// &
+         "ABORT_ON_NONCONVERGENCE); convergence "// &
+         "itself is decided by the projected-gradient threshold or by the relative-progress "// &
+         "criterion (CONVERGENCE_WINDOW, REL_PROGRESS_TOL).", &
          usage="MAX_ITER 100", default_i_val=100)
       CALL section_add_keyword(section, keyword)
       CALL keyword_release(keyword)
 
       CALL keyword_create( &
+         keyword, __LOCATION__, name="CONVERGENCE_WINDOW", &
+         description="Number of objective evaluations over which the progress of the grid "// &
+         "optimization is measured: the optimization is converged (status code 0) once the "// &
+         "best objective value improved by less than REL_PROGRESS_TOL, as a fraction, over the "// &
+         "last CONVERGENCE_WINDOW evaluations. The criterion can trigger only after more than "// &
+         "CONVERGENCE_WINDOW evaluations, so it is inactive when MAX_ITER does not exceed it.", &
+         usage="CONVERGENCE_WINDOW 200", default_i_val=200)
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+
+      CALL keyword_create( &
+         keyword, __LOCATION__, name="REL_PROGRESS_TOL", &
+         description="Relative improvement of the best objective value over the last "// &
+         "CONVERGENCE_WINDOW evaluations below which the grid optimization is considered "// &
+         "converged. The fitting objective is a normalized squared error whose absolute scale "// &
+         "depends on the system and basis, so the criterion is relative; 0 disables it, values "// &
+         "above 1 are rejected.", &
+         usage="REL_PROGRESS_TOL 1.0E-2", default_r_val=1.0E-2_dp)
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+
+      CALL keyword_create( &
          keyword, __LOCATION__, name="ABORT_ON_NONCONVERGENCE", &
-         description="Abort the calculation when the grid optimization does not reach its "// &
-         "projected-gradient convergence threshold (MAX_ITER exhausted, an objective "// &
-         "evaluation failed, or the optimizer terminated abnormally). With the default, a "// &
+         description="Abort the calculation when the grid optimization does not converge "// &
+         "(neither the projected-gradient threshold nor the relative-progress criterion was "// &
+         "met within MAX_ITER evaluations, an objective evaluation failed, or the optimizer "// &
+         "terminated abnormally). With the default, a "// &
          "warning is issued and the best grid found so far is used. The termination status "// &
          "is always printed.", &
          usage="ABORT_ON_NONCONVERGENCE T", default_l_val=.FALSE., lone_keyword_l_val=.TRUE.)
