@@ -2823,8 +2823,11 @@ CONTAINS
          "budget the optimization stops with status code 1 and the best grid found so far (see "// &
          "ABORT_ON_NONCONVERGENCE); convergence "// &
          "itself is decided by the projected-gradient threshold or by the relative-progress "// &
-         "criterion (CONVERGENCE_WINDOW, REL_PROGRESS_TOL).", &
-         usage="MAX_ITER 100", default_i_val=100)
+         "criterion (CONVERGENCE_WINDOW, REL_PROGRESS_TOL). The default of 4000 is a cap that only "// &
+         "bounds runs the criterion does not end; it is based on a single cytosine def2-TZVP "// &
+         "calibration (criterion met after 2076 evaluations), and required budgets are system- "// &
+         "and basis-dependent.", &
+         usage="MAX_ITER 4000", default_i_val=4000)
       CALL section_add_keyword(section, keyword)
       CALL keyword_release(keyword)
 

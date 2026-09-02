@@ -77,7 +77,7 @@ MODULE post_scf_bandstructure_types
    TYPE ri_rs_grid_opt_type
       LOGICAL                                          :: enabled = .FALSE.
       REAL(KIND=dp)                                    :: cutoff_atomic_cluster = 3.0_dp/angstrom
-      INTEGER                                          :: max_iter = 100
+      INTEGER                                          :: max_iter = 4000
       ! relative-progress convergence: the optimization is converged once the best objective
       ! improved by less than rel_progress_tol over the last convergence_window evaluations
       INTEGER                                          :: convergence_window = 200
