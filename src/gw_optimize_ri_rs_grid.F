@@ -16,6 +16,9 @@ MODULE gw_optimize_ri_rs_grid
                                               pbc,&
                                               use_perd_none
    USE cp_lbfgs,                        ONLY: setulb
+   USE cp_log_handling,                 ONLY: cp_get_default_logger,&
+                                              cp_logger_type
+   USE cp_output_handling,              ONLY: high_print_level
    USE gw_integrals,                    ONLY: build_3c_integral_block_ctx,&
                                               gw_3c_ctx_create,&
                                               gw_3c_ctx_release,&
@@ -74,12 +77,13 @@ CONTAINS
       INTEGER :: convergence_criterion, handle, iatom, ikind, n_dump_atoms, n_evaluations, &
          n_fd_failed, n_iterations, n_variable, opt_status, periodic(3), unit_nr
       INTEGER, ALLOCATABLE                               :: ao_size(:), grid_offsets(:), ri_size(:)
-      LOGICAL                                            :: restored_best, successful
+      LOGICAL                                            :: restored_best, successful, verbose
       REAL(KIND=dp)                                      :: best_value, f, maximum_absolute_error, &
                                                             projected_gradient_norm, &
                                                             window_progress
       REAL(KIND=dp), ALLOCATABLE                         :: g(:), lower(:), upper(:), x(:)
       TYPE(cell_type), POINTER                           :: cell
+      TYPE(cp_logger_type), POINTER                      :: logger
       TYPE(gw_3c_ctx_type)                               :: integral_context
       TYPE(local_cluster_type), ALLOCATABLE              :: clusters(:)
       TYPE(mp_para_env_type), POINTER                    :: para_env
@@ -207,30 +211,40 @@ CONTAINS
       CASE DEFAULT
          status_text = "L-BFGS-B terminated abnormally: "//TRIM(terminal_task)
       END SELECT
+      ! The termination block. At the default GLOBAL%PRINT_LEVEL (MEDIUM) and below it prints the
+      ! heading, the termination status code, its one-line reason, the convergence criterion code,
+      ! the note when an earlier best iterate is returned, and the two 3C error lines -- what a
+      ! user and the regtest matchers need. The optimizer details (evaluations, iterations,
+      ! projected gradient, threshold, window, tolerance, achieved progress, best objective) are
+      ! printed only from PRINT_LEVEL HIGH.
+      logger => cp_get_default_logger()
+      verbose = (logger%iter_info%print_level >= high_print_level)
       IF (unit_nr > 0) THEN
          WRITE (unit_nr, '(/,T2,A)') 'RI-RS grid optimization terminated'
          WRITE (unit_nr, '(T2,A,T72,I9)') &
             'RI-RS grid optimization termination status code:', opt_status
          WRITE (unit_nr, '(T2,A,1X,A)') 'Termination reason:', TRIM(status_text)
-         WRITE (unit_nr, '(T2,A,T72,I9)') 'Objective evaluations used:', n_evaluations
-         WRITE (unit_nr, '(T2,A,T72,I9)') 'L-BFGS-B iterations:', n_iterations
-         WRITE (unit_nr, '(T2,A,T72,ES9.1)') &
-            'Projected gradient norm (inf), last L-BFGS-B iterate:', projected_gradient_norm
-         WRITE (unit_nr, '(T2,A,T72,ES9.1)') 'Convergence threshold:', optimizer_accuracy
-         WRITE (unit_nr, '(T2,A,T72,I9)') 'Convergence window (evaluations):', &
-            bs_env%ri_rs%grid_opt%convergence_window
-         WRITE (unit_nr, '(T2,A,T72,ES9.1)') 'Relative progress tolerance:', &
-            bs_env%ri_rs%grid_opt%rel_progress_tol
-         IF (window_progress >= 0.0_dp) THEN
-            WRITE (unit_nr, '(T2,A,T72,ES9.1)') &
-               'Relative objective progress over the last window:', window_progress
-         END IF
          WRITE (unit_nr, '(T2,A,T72,I9)') &
             'RI-RS grid optimization convergence criterion code:', convergence_criterion
-         WRITE (unit_nr, '(T2,A,T72,ES9.1)') 'Best objective value:', best_value
          IF (restored_best) THEN
             WRITE (unit_nr, '(T2,A)') &
                'Returned grid is an earlier best iterate, not the final L-BFGS-B point'
+         END IF
+         IF (verbose) THEN
+            WRITE (unit_nr, '(T2,A,T72,I9)') 'Objective evaluations used:', n_evaluations
+            WRITE (unit_nr, '(T2,A,T72,I9)') 'L-BFGS-B iterations:', n_iterations
+            WRITE (unit_nr, '(T2,A,T72,ES9.1)') &
+               'Projected gradient norm (inf), last L-BFGS-B iterate:', projected_gradient_norm
+            WRITE (unit_nr, '(T2,A,T72,ES9.1)') 'Convergence threshold:', optimizer_accuracy
+            WRITE (unit_nr, '(T2,A,T72,I9)') 'Convergence window (evaluations):', &
+               bs_env%ri_rs%grid_opt%convergence_window
+            WRITE (unit_nr, '(T2,A,T72,ES9.1)') 'Relative progress tolerance:', &
+               bs_env%ri_rs%grid_opt%rel_progress_tol
+            IF (window_progress >= 0.0_dp) THEN
+               WRITE (unit_nr, '(T2,A,T72,ES9.1)') &
+                  'Relative objective progress over the last window:', window_progress
+            END IF
+            WRITE (unit_nr, '(T2,A,T72,ES9.1)') 'Best objective value:', best_value
          END IF
          WRITE (unit_nr, '(T2,A,T72,ES9.1)') 'Normalized 3C error:', f
          WRITE (unit_nr, '(T2,A,T72,ES9.1)') &
