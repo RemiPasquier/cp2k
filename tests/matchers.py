@@ -409,10 +409,10 @@ registry["RIRS_Grid_Optimization_Error"] = GenericMatcher(
     r"Normalized 3C error:", col=4
 )
 registry["RIRS_Grid_Optimization_Status"] = GenericMatcher(
-    r"RI-RS grid optimization termination status code:", col=7
+    r"RI-RS grid optimization exit status:", col=6
 )
 registry["RIRS_Grid_Optimization_Criterion"] = GenericMatcher(
-    r"RI-RS grid optimization convergence criterion code:", col=7
+    r"RI-RS grid optimization convergence rule that fired:", col=8
 )
 registry["RIRS_Grid_Gradient_Check_Failures"] = GenericMatcher(
     r"FD gradient check, components beyond tolerance:", col=7

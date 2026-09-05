@@ -43,7 +43,7 @@ MODULE gw_optimize_ri_rs_grid
 
    CHARACTER(len=*), PARAMETER, PRIVATE :: moduleN = 'gw_optimize_ri_rs_grid'
    REAL(KIND=dp), PARAMETER, PRIVATE :: optimizer_accuracy = 1.0E-9_dp
-   ! termination status codes of optimize_grid_coordinates (printed; matched by regtests)
+   ! exit status codes of optimize_grid_coordinates (printed; matched by regtests)
    INTEGER, PARAMETER, PRIVATE :: grid_opt_status_converged = 0, &
                                   grid_opt_status_max_iter = 1, &
                                   grid_opt_status_eval_failed = 2, &
@@ -187,7 +187,7 @@ CONTAINS
                           maximum_absolute_error, successful)
       IF (.NOT. successful) CPABORT("RI-RS grid optimization produced no regularized fit")
 
-      ! convergence criterion code: 0 none, 1 projected gradient, 2 relative progress,
+      ! convergence rule that fired: 0 none, 1 projected gradient, 2 relative progress,
       ! 3 zero-progress step reported by L-BFGS-B
       convergence_criterion = 0
       SELECT CASE (opt_status)
@@ -212,7 +212,7 @@ CONTAINS
          status_text = "L-BFGS-B terminated abnormally: "//TRIM(terminal_task)
       END SELECT
       ! The termination block. At the default GLOBAL%PRINT_LEVEL (MEDIUM) and below it prints the
-      ! heading, the termination status code, its one-line reason, the convergence criterion code,
+      ! heading, the exit status with its legend, the one-line reason, the convergence rule that fired,
       ! the note when an earlier best iterate is returned, and the two 3C error lines -- what a
       ! user and the regtest matchers need. The optimizer details (evaluations, iterations,
       ! projected gradient, threshold, window, tolerance, achieved progress, best objective) are
@@ -222,10 +222,14 @@ CONTAINS
       IF (unit_nr > 0) THEN
          WRITE (unit_nr, '(/,T2,A)') 'RI-RS grid optimization terminated'
          WRITE (unit_nr, '(T2,A,T72,I9)') &
-            'RI-RS grid optimization termination status code:', opt_status
+            'RI-RS grid optimization exit status:', opt_status
+         WRITE (unit_nr, '(T4,A)') &
+            '(0 converged, 1 MAX_ITER exhausted, 2 objective evaluation failed, 3 abnormal)'
          WRITE (unit_nr, '(T2,A,1X,A)') 'Termination reason:', TRIM(status_text)
          WRITE (unit_nr, '(T2,A,T72,I9)') &
-            'RI-RS grid optimization convergence criterion code:', convergence_criterion
+            'RI-RS grid optimization convergence rule that fired:', convergence_criterion
+         WRITE (unit_nr, '(T4,A)') &
+            '(0 none, 1 projected gradient, 2 relative progress, 3 zero-progress step)'
          IF (restored_best) THEN
             WRITE (unit_nr, '(T2,A)') &
                'Returned grid is an earlier best iterate, not the final L-BFGS-B point'
@@ -302,7 +306,7 @@ CONTAINS
 !>        pathological small-file pattern on Lustre-style parallel filesystems).
 !> \param bs_env GW environment holding the optimized grid cache and the RI-RS input settings.
 !> \param particle_set Atoms of the structure (element symbols for the per-atom sections).
-!> \param opt_status Optimizer termination status code (grid_opt_status_* codes).
+!> \param opt_status Optimizer exit status (grid_opt_status_* codes).
 !> \param n_evaluations Objective-and-gradient evaluations used by the optimizer.
 !> \param best_value Best objective value reached by the optimizer.
 !> \param n_atoms_written Number of atom sections written.
@@ -340,7 +344,7 @@ CONTAINS
       WRITE (preamble(4), '(A,I0)') 'n atoms : ', natom
       preamble(5) = 'units : Bohr'
       preamble(6) = 'coordinates : atom-relative (origin at the atom)'
-      WRITE (preamble(7), '(A,I0)') 'optimizer termination status code : ', opt_status
+      WRITE (preamble(7), '(A,I0)') 'optimizer exit status : ', opt_status
       WRITE (preamble(8), '(A,I0)') 'objective evaluations : ', n_evaluations
       WRITE (preamble(9), '(A,ES16.8)') 'best objective value : ', best_value
       WRITE (preamble(10), '(A,F10.4)') 'training metric radius [angstrom] : ', &

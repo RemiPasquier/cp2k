@@ -2820,7 +2820,7 @@ CONTAINS
          keyword, __LOCATION__, name="MAX_ITER", &
          description="Budget of objective-and-gradient evaluations for the single cooperative "// &
          "Cartesian grid optimization. When the optimizer requests an evaluation beyond this "// &
-         "budget the optimization stops with status code 1 and the best grid found so far (see "// &
+         "budget the optimization stops with exit status 1 and the best grid found so far (see "// &
          "ABORT_ON_NONCONVERGENCE); convergence "// &
          "itself is decided by the projected-gradient threshold or by the relative-progress "// &
          "criterion (CONVERGENCE_WINDOW, REL_PROGRESS_TOL). The default of 4000 is a cap that only "// &
@@ -2834,7 +2834,7 @@ CONTAINS
       CALL keyword_create( &
          keyword, __LOCATION__, name="CONVERGENCE_WINDOW", &
          description="Number of objective evaluations over which the progress of the grid "// &
-         "optimization is measured: the optimization is converged (status code 0) once the "// &
+         "optimization is measured: the optimization is converged (exit status 0) once the "// &
          "best objective value improved by less than REL_PROGRESS_TOL, as a fraction, over the "// &
          "last CONVERGENCE_WINDOW evaluations. The criterion can trigger only after more than "// &
          "CONVERGENCE_WINDOW evaluations, so it is inactive when MAX_ITER does not exceed it.", &
@@ -2879,7 +2879,7 @@ CONTAINS
          keyword, __LOCATION__, name="GRID_DUMP", &
          description="File name for a provenance dump of the optimized grids. When set, rank 0 "// &
          "writes this single file after the optimization: a <preamble> block with the atom count, "// &
-         "units (Bohr), the optimizer termination status code, objective evaluations and best "// &
+         "units (Bohr), the optimizer exit status, objective evaluations and best "// &
          "objective value, the training metric radius and GRID_SELECT / GRID_FILE_SUFFIX of the "// &
          "source grids, followed by one <atom> section per atom giving its index, element, number "// &
          "of points and a <grid_points> block with the atom-relative coordinates in bohr exactly "// &
