@@ -590,10 +590,12 @@ CONTAINS
                 Int_3c_munu_P(n_AO_pairs, nRI), mu_of_pair(n_AO_pairs), nu_of_pair(n_AO_pairs), &
                 jacobi_scaling(n_grid_points))
       CALL timeset("rirs_cluster_AO_products", phase_handle)
-      i_ao_pair = 0
+!$OMP PARALLEL DO DEFAULT(NONE) SCHEDULE(DYNAMIC) &
+!$OMP SHARED(nAO, nRI, n_grid_points, Phi_l_mu, Int_3c, Phi_munu_l, Int_3c_munu_P, mu_of_pair, nu_of_pair) &
+!$OMP PRIVATE(inu, imu, i_ao_pair, symmetry_factor, igrid_point, ip)
       DO inu = 1, nAO
          DO imu = 1, inu
-            i_ao_pair = i_ao_pair + 1
+            i_ao_pair = inu*(inu - 1)/2 + imu
             mu_of_pair(i_ao_pair) = imu
             nu_of_pair(i_ao_pair) = inu
             symmetry_factor = SQRT(REAL(2 - MERGE(1, 0, imu == inu), dp))
@@ -606,6 +608,7 @@ CONTAINS
             END DO
          END DO
       END DO
+!$OMP END PARALLEL DO
 
       Int_3c_norm2 = SUM(Int_3c_munu_P*Int_3c_munu_P)
       CALL timestop(phase_handle)
@@ -616,12 +619,15 @@ CONTAINS
       END IF
 
       ! D'_ll' = d_l D_ll' d_l' + λδ_ll', with d_l = 1/sqrt(D_ll).
+!$OMP PARALLEL DO DEFAULT(NONE) SHARED(n_grid_points, Phi_munu_l, Phi_munu_l_scaled, jacobi_scaling) &
+!$OMP PRIVATE(igrid_point, Phi_munu_norm2)
       DO igrid_point = 1, n_grid_points
          Phi_munu_norm2 = SUM(Phi_munu_l(:, igrid_point)*Phi_munu_l(:, igrid_point))
          jacobi_scaling(igrid_point) = 1.0_dp/SQRT(MAX(Phi_munu_norm2, jacobi_floor))
          Phi_munu_l_scaled(:, igrid_point) = &
             jacobi_scaling(igrid_point)*Phi_munu_l(:, igrid_point)
       END DO
+!$OMP END PARALLEL DO
       ALLOCATE (D_ll(n_grid_points, n_grid_points), d_lP(n_grid_points, nRI), Z_prime_lP(n_grid_points, nRI))
       CALL timeset("rirs_cluster_D_ll", phase_handle)
       CALL dgemm('T', 'N', n_grid_points, n_grid_points, n_AO_pairs, 1.0_dp, Phi_munu_l_scaled, n_AO_pairs, &
@@ -688,7 +694,13 @@ CONTAINS
 
       CALL timestop(phase_handle)
       CALL timeset("rirs_cluster_gradient_coordinates", phase_handle)
+!$OMP PARALLEL DEFAULT(NONE) &
+!$OMP SHARED(n_grid_points, n_AO_pairs, jacobi_scaling, Phi_munu_l, mu_of_pair, nu_of_pair) &
+!$OMP SHARED(dPhi_alpha_l_mu, Phi_l_mu, dE_dPhi_munu_l, coordinate_gradient) &
+!$OMP PRIVATE(igrid_point, jacobi_scale, Phi_munu_norm2, icartesian, i_ao_pair, imu, inu) &
+!$OMP PRIVATE(symmetry_factor, dPhi_munu_l, dPhi_munu_l_scaled, scaling_projection)
       ALLOCATE (dPhi_munu_l_scaled(n_AO_pairs))
+!$OMP DO
       DO igrid_point = 1, n_grid_points
          jacobi_scale = jacobi_scaling(igrid_point)
          Phi_munu_norm2 = SUM(Phi_munu_l(:, igrid_point)*Phi_munu_l(:, igrid_point))
@@ -714,9 +726,14 @@ CONTAINS
                DOT_PRODUCT(dE_dPhi_munu_l(:, igrid_point), dPhi_munu_l_scaled)
          END DO
       END DO
+!$OMP END DO
+      DEALLOCATE (dPhi_munu_l_scaled)
+!$OMP END PARALLEL
 
       CALL timestop(phase_handle)
       max_abs_error = 0.0_dp
+!$OMP PARALLEL DO DEFAULT(NONE) SHARED(nRI, n_AO_pairs, mu_of_pair, nu_of_pair, R_munu_P) &
+!$OMP PRIVATE(ip, i_ao_pair, symmetry_factor, absolute_error) REDUCTION(MAX:max_abs_error)
       DO ip = 1, nRI
          DO i_ao_pair = 1, n_AO_pairs
             symmetry_factor = &
@@ -725,9 +742,10 @@ CONTAINS
             max_abs_error = MAX(max_abs_error, absolute_error)
          END DO
       END DO
+!$OMP END PARALLEL DO
 
       fit_successful = .TRUE.
-      DEALLOCATE (Phi_munu_l, Phi_munu_l_scaled, Int_3c_munu_P, dE_dPhi_munu_l, dPhi_munu_l_scaled, D_ll, &
+      DEALLOCATE (Phi_munu_l, Phi_munu_l_scaled, Int_3c_munu_P, dE_dPhi_munu_l, D_ll, &
                   mu_of_pair, nu_of_pair, R_munu_P, jacobi_scaling, D_inverse_Z_prime_lP, Z_prime_lP)
       CALL timestop(handle)
    END SUBROUTINE evaluate_rirs_grid_cluster
