@@ -15,6 +15,7 @@ MODULE gw_ri_rs_grid_optimization
    USE cell_types,                      ONLY: cell_type
    USE cp_lbfgs,                        ONLY: setulb
    USE gw_ri_rs_grid_initialization,    ONLY: initialize_ri_rs_grid
+   USE gw_ri_rs_grid_restart,           ONLY: read_ri_rs_grid_restart
    USE gw_ri_rs_utils,                  ONLY: evaluate_ao_basis_on_points,&
                                               filter_grid_to_voronoi,&
                                               get_rirs_cluster_atoms
@@ -68,6 +69,9 @@ CONTAINS
       ! setup Lebedev initial grid inside Voronoi volume, select points with Cholesky decomp.
       CALL initialize_ri_rs_grid(bs_env)
 
+      ! WARM_START: replace the initial points by a grid written by an earlier run.
+      IF (bs_env%ri_rs%grid_opt%warm_start) CALL apply_warm_start(bs_env)
+
       ! Validate the initialized RI-RS state and report the start of the optimization.
       CALL prepare_ri_rs_grid_optimization(bs_env)
 
@@ -81,6 +85,29 @@ CONTAINS
       CALL timestop(handle)
 
    END SUBROUTINE optimize_ri_rs_grid
+
+! **************************************************************************************************
+!> \brief Replace the initialized atom-relative points by those of READ_GRID_FILE_NAME (WARM_START).
+!> \param bs_env ...
+! **************************************************************************************************
+   SUBROUTINE apply_warm_start(bs_env)
+      TYPE(post_scf_bandstructure_type), POINTER         :: bs_env
+
+      INTEGER                                            :: iatom
+      TYPE(rirs_grid_type), ALLOCATABLE                  :: grids(:)
+
+      CALL read_ri_rs_grid_restart(bs_env, TRIM(bs_env%ri_rs%grid_opt%read_file), .FALSE., grids)
+      DO iatom = 1, bs_env%n_atom
+         IF (grids(iatom)%npts /= bs_env%ri_rs%atomic_grids(iatom)%npts) THEN
+            CPABORT("WARM_START: number of grid points differs from the initialized grid")
+         END IF
+         bs_env%ri_rs%atomic_grids(iatom)%raw_points(:, :) = grids(iatom)%raw_points
+      END DO
+      DEALLOCATE (grids)
+      IF (bs_env%unit_nr > 0) WRITE (bs_env%unit_nr, "(T2,A)") &
+         "RI-RS grid optimization starts from the read grid (WARM_START)"
+
+   END SUBROUTINE apply_warm_start
 
 ! **************************************************************************************************
 !> \brief Validate state and user input needed to initialize and optimize RI-RS grids.

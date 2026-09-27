@@ -365,6 +365,12 @@ CONTAINS
       CALL section_vals_val_get(grid_opt_sec, "MAX_ITER", i_val=grid_opt%max_iter)
       CALL section_vals_val_get(grid_opt_sec, "RS_AO_RATIO", r_val=grid_opt%rs_ao_ratio)
       IF (grid_opt%rs_ao_ratio <= 0.0_dp) CPABORT("RS_AO_RATIO must be positive")
+      CALL section_vals_val_get(grid_opt_sec, "SAVE_GRID_FILE_NAME", c_val=grid_opt%save_file)
+      CALL section_vals_val_get(grid_opt_sec, "READ_GRID_FILE_NAME", c_val=grid_opt%read_file)
+      CALL section_vals_val_get(grid_opt_sec, "WARM_START", l_val=grid_opt%warm_start)
+      IF (grid_opt%warm_start .AND. LEN_TRIM(grid_opt%read_file) == 0) THEN
+         CPABORT("WARM_START requires READ_GRID_FILE_NAME")
+      END IF
       CALL timestop(handle)
 
    END SUBROUTINE read_rirs_grid_opt

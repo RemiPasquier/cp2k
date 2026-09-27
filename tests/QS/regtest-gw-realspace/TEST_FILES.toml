@@ -41,4 +41,35 @@
                                           {matcher="RIRS_Grid_Optimization_Error", tol=1e-1, ref=8.4e-4}]
 # Candidate generation exceeds its default ratio; rank saturation is completed by maximin.
 "rirs-grid-rank-saturation-maximin-H2O.inp" = [{matcher="RIRS_Grid", tol=1e-12, ref=280}]
+# Grid restart: SAVE_GRID_FILE_NAME, then READ_GRID_FILE_NAME (exact reuse), reading and saving the same file, then
+# WARM_START; sequential, shared workdir.
+"rirs-grid-restart-save-H2O.inp" = [{matcher="RIRS_Grid", tol=1e-12, ref=24},
+                                    {matcher="RIRS_Grid_Written", tol=1e-12, ref=24},
+                                    {matcher="RIRS_Grid_Optimization_Error", tol=1e-1, ref=6.3e-4},
+                                    {matcher="E_RIRS_HOMO", tol=1e-03, ref=-6.096},
+                                    {matcher="E_RIRS_LUMO", tol=1e-03, ref=17.684},
+                                    {matcher="E_G0W0_direct_gap", tol=1e-03, ref=23.780}]
+# Exact reuse: no optimization (RIRS_Grid_Reused is printed only on that path), same grid, so the same values as the
+# saving run.
+"rirs-grid-restart-read-H2O.inp" = [{matcher="RIRS_Grid", tol=1e-12, ref=24},
+                                    {matcher="RIRS_Grid_Reused", tol=1e-12, ref=24},
+                                    {matcher="RIRS_Grid_Read_Displacement", tol=1e-12, ref=0.0},
+                                    {matcher="E_RIRS_HOMO", tol=1e-03, ref=-6.096},
+                                    {matcher="E_RIRS_LUMO", tol=1e-03, ref=17.684},
+                                    {matcher="E_G0W0_direct_gap", tol=1e-03, ref=23.780}]
+# Reads and replaces the same file (all ranks must finish reading before the source rank writes).
+"rirs-grid-restart-resave-H2O.inp" = [{matcher="RIRS_Grid", tol=1e-12, ref=24},
+                                      {matcher="RIRS_Grid_Reused", tol=1e-12, ref=24},
+                                      {matcher="RIRS_Grid_Written", tol=1e-12, ref=24},
+                                      {matcher="RIRS_Grid_Read_Displacement", tol=1e-12, ref=0.0},
+                                      {matcher="E_RIRS_HOMO", tol=1e-03, ref=-6.096},
+                                      {matcher="E_RIRS_LUMO", tol=1e-03, ref=17.684},
+                                      {matcher="E_G0W0_direct_gap", tol=1e-03, ref=23.780}]
+# Warm start on a geometry with one H moved by 0.005 A.
+"rirs-grid-restart-warm-H2O.inp" = [{matcher="RIRS_Grid", tol=1e-12, ref=24},
+                                    {matcher="RIRS_Grid_Read_Displacement", tol=1e-03, ref=4.724e-3},
+                                    {matcher="RIRS_Grid_Optimization_Error", tol=1e-1, ref=5.9e-4},
+                                    {matcher="E_RIRS_HOMO", tol=1e-03, ref=-6.088},
+                                    {matcher="E_RIRS_LUMO", tol=1e-03, ref=17.623},
+                                    {matcher="E_G0W0_direct_gap", tol=1e-03, ref=23.711}]
 #EOF
