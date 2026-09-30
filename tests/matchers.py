@@ -465,6 +465,14 @@ registry["RIRS_CUTOFF"] = GenericMatcher(
 registry["RIRS_Grid_Optimization_Error"] = GenericMatcher(
     r"Normalized 3C error:", col=4
 )
+registry["RIRS_Grid_Read_Displacement"] = GenericMatcher(
+    r"RI-RS grid read from:", col=9
+)
+registry["RIRS_Grid_Reused"] = GenericMatcher(
+    r"RI-RS grid reused without optimization, points:", col=7
+)
+registry["RIRS_Grid_Written"] = GenericMatcher(r"RI-RS grid points written:", col=5)
+registry["RIRS_Cluster_Groups"] = GenericMatcher(r"RI-RS grid cluster groups:", col=5)
 registry["E_RIRS_HOMO"] = GenericMatcher(r"G0W0 valence band maximum", col=6)
 registry["E_RIRS_LUMO"] = GenericMatcher(r"G0W0 conduction band minimum", col=6)
 

@@ -78,6 +78,9 @@ MODULE post_scf_bandstructure_types
       REAL(KIND=dp)                                    :: cutoff_atomic_cluster = 3.0_dp/angstrom
       REAL(KIND=dp)                                    :: rs_ao_ratio = 5.0_dp
       INTEGER                                          :: max_iter = 300
+      INTEGER                                          :: num_cluster_groups = 0
+      CHARACTER(LEN=default_path_length)               :: save_file = "", read_file = ""
+      LOGICAL                                          :: warm_start = .FALSE.
    END TYPE ri_rs_grid_opt_type
 
    TYPE ri_rs_env

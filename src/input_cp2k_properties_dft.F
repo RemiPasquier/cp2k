@@ -2867,6 +2867,55 @@ CONTAINS
       CALL section_add_keyword(section, keyword)
       CALL keyword_release(keyword)
 
+      CALL keyword_create( &
+         keyword, __LOCATION__, name="NUM_CLUSTER_GROUPS", &
+         description="Number of equally sized rank groups evaluating whole atomic clusters. "// &
+         "Zero (the default) uses one rank per group. Fewer groups can be faster for some workloads. "// &
+         "One uses all ranks together; the rank count uses one rank per group. "// &
+         "Positive values select that many groups, rounded down to a divisor of the rank count "// &
+         "with a warning if necessary. Groups with multiple ranks distribute AO-pair contractions "// &
+         "and solve columns; single-rank groups use the single-rank evaluator. "// &
+         "Grids and integrals remain replicated within each group. Negative values are invalid.", &
+         usage="NUM_CLUSTER_GROUPS 0", default_i_val=0)
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+
+      CALL keyword_create( &
+         keyword, __LOCATION__, name="SAVE_GRID_FILE_NAME", &
+         description="If set, the RI-RS grid is written to this file once it has been built. The file "// &
+         "stores the atom-relative grid of every atom together with the atom positions, the AO and RI "// &
+         "basis set definitions, the cell and RS_AO_RATIO, CUTOFF_ATOMIC_CLUSTER, the RI metric cutoff "// &
+         "radius and TIKHONOV, so that a later run of the same system can reuse it with "// &
+         "READ_GRID_FILE_NAME. It also records the mode, MAX_ITER and EPS_FILTER of the writing run for "// &
+         "information; re-saving a read grid does not preserve its original optimization settings. "// &
+         "Saving is not supported if an element symbol or an AO or RI basis name contains a double quote.", &
+         usage="SAVE_GRID_FILE_NAME H2O.rirs_grid", default_lc_val="")
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+
+      CALL keyword_create( &
+         keyword, __LOCATION__, name="READ_GRID_FILE_NAME", &
+         description="If set, the RI-RS grid is read from this file, written by SAVE_GRID_FILE_NAME. "// &
+         "Without WARM_START the grid is used unchanged and the grid optimization is skipped. CP2K stops "// &
+         "unless the elements and order of the atoms, the AO and RI basis set definitions, the cell and "// &
+         "periodicity, RS_AO_RATIO, CUTOFF_ATOMIC_CLUSTER, the RI metric cutoff radius and TIKHONOV match "// &
+         "the writing run (numerical values satisfy abs(file - run) <= 1e-12 * max(1, abs(run))). "// &
+         "Without WARM_START, every atomic-position component must also agree within 1e-8 bohr. "// &
+         "MAX_ITER may differ. With WARM_START the grid optimization starts from the read grid.", &
+         usage="READ_GRID_FILE_NAME H2O.rirs_grid", default_lc_val="")
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+
+      CALL keyword_create( &
+         keyword, __LOCATION__, name="WARM_START", &
+         description="Start the grid optimization from the grid read with READ_GRID_FILE_NAME instead of "// &
+         "skipping it. Atoms may have moved since the file was written (for example between successive "// &
+         "geometries); the other quantities checked by READ_GRID_FILE_NAME must still match. The grid points move "// &
+         "with their atoms, and MAX_ITER limits the number of evaluations as usual.", &
+         usage="WARM_START", default_l_val=.FALSE., lone_keyword_l_val=.TRUE.)
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+
    END SUBROUTINE create_ri_rs_grid_optimization_section
 
 ! **************************************************************************************************
