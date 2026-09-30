@@ -238,6 +238,7 @@ list(
   gw_utils_fm.F
   gw_utils_communication.F
   gw.F
+  gw_cd_lcg.F
   gw_tensor_large_cell_gamma.F
   gw_tensor_large_cell_gamma_static_cohsex.F
   gw_tensor_small_cell_full_kp.F
@@ -419,6 +420,7 @@ list(
   molsym.F
   moments_utils.F
   motion_utils.F
+  mp2_cd_producer.F
   mp2_cphf.F
   mp2_direct_method.F
   mp2_eri.F

@@ -1,0 +1,3 @@
+# On-the-fly Cholesky (CD) auxiliary basis on the large-cell Gamma GW route, molecules (&PROPERTIES&BANDSTRUCTURE&GW&CHOLESKY)
+"01_CD_LCG_G0W0_PBE_H2O.inp"           = [{matcher="E_G0W0_direct_gap", tol=1e-03, ref=15.877}]
+"02_CD_LCG_G0W0_PBE_HCN_CUTOFF.inp"    = [{matcher="E_G0W0_direct_gap", tol=1e-03, ref=18.505}]

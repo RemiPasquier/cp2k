@@ -69,6 +69,10 @@ MODULE mp2_integrals
    USE message_passing,                 ONLY: mp_cart_type,&
                                               mp_comm_type,&
                                               mp_para_env_type
+   USE mp2_cd_producer,                 ONLY: cd_distribute_columns,&
+                                              cd_fill_column,&
+                                              cd_get_rank,&
+                                              cd_release_aux
    USE mp2_eri,                         ONLY: mp2_eri_3c_integrate
    USE mp2_eri_gpw,                     ONLY: cleanup_gpw,&
                                               mp2_eri_3c_integrate_gpw,&
@@ -271,9 +275,9 @@ CONTAINS
                                                             periodic
       LOGICAL                                            :: do_gpw, do_kpoints_from_Gamma, do_svd, &
                                                             memory_info
-      REAL(KIND=dp) :: compression_factor, cutoff_old, eps_pgf_orb, eps_pgf_orb_old, eps_svd, &
-         mem_for_abK, mem_for_iaK, mem_for_ijK, memory_3c, occ, omega_pot, rc_ang, &
-         relative_cutoff_old
+      REAL(KIND=dp) :: cd_metric_entry, cd_metric_error, compression_factor, cutoff_old, &
+         eps_pgf_orb, eps_pgf_orb_old, eps_svd, mem_for_abK, mem_for_iaK, mem_for_ijK, memory_3c, &
+         occ, omega_pot, rc_ang, relative_cutoff_old
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:)           :: e_cutoff_old
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: my_Lrows, my_Vrows
       TYPE(cp_eri_mme_param), POINTER                    :: eri_param
@@ -378,6 +382,22 @@ CONTAINS
                             fm_matrix_Minv, fm_matrix_Minv_Vtrunc_Minv, &
                             do_im_time, do_kpoints_from_Gamma .OR. do_kpoints_cubic_RPA, qs_env%mp2_env%mp2_gpw%eps_pgf_orb_S, &
                             qs_kind_set, sab_orb_sub, calc_forces, unit_nr)
+
+      IF (qs_env%mp2_env%cholesky%enabled) THEN
+         CPASSERT(dimen_RI == cd_get_rank() .AND. dimen_RI_red == dimen_RI)
+         CPASSERT(SIZE(my_Lrows, 1) == dimen_RI .AND. SIZE(my_Lrows, 2) == my_group_L_size)
+         cd_metric_error = 0.0_dp
+         DO j = 1, my_group_L_size
+            DO i = 1, dimen_RI
+               cd_metric_entry = ABS(my_Lrows(i, j) - MERGE(1.0_dp, 0.0_dp, i == my_group_L_start + j - 1))
+               IF (.NOT. (cd_metric_entry <= 100.0_dp*EPSILON(1.0_dp))) THEN
+                  CPABORT("CD_CONSUMER: decomposed identity metric changed")
+               END IF
+               cd_metric_error = MAX(cd_metric_error, cd_metric_entry)
+            END DO
+         END DO
+         IF (unit_nr > 0) WRITE (unit_nr, '(A,ES24.16)') 'CD_CONSUMER| metric_max_abs_error ', cd_metric_error
+      END IF
 
       IF (unit_nr > 0) THEN
          ASSOCIATE (ri_metric => qs_env%mp2_env%ri_metric)
@@ -561,7 +581,7 @@ CONTAINS
 
             ! Add a warning for automatically generated RI_AUX basis sets
             ! Tend to be not sufficiently converged
-            IF (qs_env%mp2_env%ri_aux_auto_generated) THEN
+            IF (qs_env%mp2_env%ri_aux_auto_generated .AND. .NOT. qs_env%mp2_env%cholesky%enabled) THEN
                CALL cp_warn(__LOCATION__, &
                             "At least one RI_AUX basis set was not explicitly invoked in &KIND-section. "// &
                             "Automatically RI-basis sets and ERI_METHOD OS tend to be not converged. "// &
@@ -576,12 +596,27 @@ CONTAINS
                CALL dbcsr_copy(mat_munu_local_L(LLL)%matrix, mat_munu%matrix)
                CALL dbcsr_set(mat_munu_local_L(LLL)%matrix, 0.0_dp)
             END DO
-            CALL mp2_eri_3c_integrate(eri_param, ri_metric, para_env_sub, qs_env, &
-                                      first_c=my_group_L_start, last_c=my_group_L_end, &
-                                      mat_ab=mat_munu_local_L, &
-                                      basis_type_a="ORB", basis_type_b="ORB", &
-                                      basis_type_c="RI_AUX", &
-                                      sab_nl=sab_orb_sub, eri_method=eri_method)
+            IF (qs_env%mp2_env%cholesky%enabled) THEN
+               CPASSERT(dimen_RI == cd_get_rank())
+               CPASSERT(dimen_RI_red == dimen_RI)
+               CALL cd_distribute_columns(para_env, my_group_L_start, my_group_L_end)
+               DO LLL = 1, my_group_L_size
+                  CALL cd_fill_column(my_group_L_start + LLL - 1, mat_munu_local_L(LLL)%matrix)
+               END DO
+               IF (unit_nr > 0) THEN
+                  WRITE (unit_nr, '(A,I0)') 'CD_CONSUMER| naux ', dimen_RI
+                  WRITE (unit_nr, '(A)') 'CD_CONSUMER| metric identity'
+                  WRITE (unit_nr, '(A,I0)') 'CD_CONSUMER| ao_columns_filled ', my_group_L_size
+               END IF
+               CALL cd_release_aux()
+            ELSE
+               CALL mp2_eri_3c_integrate(eri_param, ri_metric, para_env_sub, qs_env, &
+                                         first_c=my_group_L_start, last_c=my_group_L_end, &
+                                         mat_ab=mat_munu_local_L, &
+                                         basis_type_a="ORB", basis_type_b="ORB", &
+                                         basis_type_c="RI_AUX", &
+                                         sab_nl=sab_orb_sub, eri_method=eri_method)
+            END IF
 
             DO ispin = 1, nspins
                DO LLL = 1, my_group_L_size
@@ -636,6 +671,11 @@ CONTAINS
 
             END IF
 
+            IF (qs_env%mp2_env%cholesky%enabled .AND. unit_nr > 0) THEN
+               WRITE (unit_nr, '(A,I0)') 'CD_CONSUMER| ia_spin_channels ', nspins
+               IF (my_do_gw) WRITE (unit_nr, '(A,I0)') 'CD_CONSUMER| gw_spin_channels ', nspins
+               IF (do_bse) WRITE (unit_nr, '(A)') 'CD_CONSUMER| bse_ij_ab transformed'
+            END IF
             DO LLL = 1, my_group_L_size
                CALL dbcsr_release_p(mat_munu_local_L(LLL)%matrix)
             END DO
