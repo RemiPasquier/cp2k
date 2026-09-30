@@ -30,7 +30,8 @@ MODULE gw_tensor_large_cell_Gamma
                                               cp_cfm_release,&
                                               cp_cfm_to_cfm,&
                                               cp_cfm_to_fm,&
-                                              cp_cfm_type
+                                              cp_cfm_type,&
+                                              cp_fm_to_cfm
    USE cp_dbcsr_api,                    ONLY: &
         dbcsr_add, dbcsr_copy, dbcsr_create, dbcsr_get_block_p, dbcsr_iterator_blocks_left, &
         dbcsr_iterator_next_block, dbcsr_iterator_start, dbcsr_iterator_stop, dbcsr_iterator_type, &
@@ -57,6 +58,8 @@ MODULE gw_tensor_large_cell_Gamma
                                               dbt_destroy,&
                                               dbt_filter,&
                                               dbt_type
+   USE gw_cd_lcg,                       ONLY: cd_lcg_get_T,&
+                                              cd_lcg_matrix_pair
    USE gw_utils,                        ONLY: analyt_conti_and_print,&
                                               de_init_bs_env,&
                                               time_to_freq
@@ -511,6 +514,10 @@ CONTAINS
       TYPE(section_vals_type), POINTER                   :: input
 
       CALL timeset(routineN, handle)
+      IF (qs_env%bs_env%do_cd_lcg) THEN
+         CALL timestop(handle)
+         RETURN
+      END IF
 
       CALL get_qs_env(qs_env, input=input)
 
@@ -628,6 +635,12 @@ CONTAINS
       TYPE(dbt_type), ALLOCATABLE, DIMENSION(:, :)       :: t_3c_array
 
       CALL timeset(routineN, handle)
+
+      IF (bs_env%do_cd_lcg) THEN
+         CALL cd_lcg_get_T(bs_env, t_3c, atoms_RI, atoms_AO_1, atoms_AO_2)
+         CALL timestop(handle)
+         RETURN
+      END IF
 
       ! free memory (not clear whether memory has been freed previously)
       CALL dbt_clear(t_3c)
@@ -832,11 +845,23 @@ CONTAINS
       TYPE(atomic_kind_type), DIMENSION(:), POINTER      :: atomic_kind_set
       TYPE(cell_type), POINTER                           :: cell
       TYPE(cp_fm_type)                                   :: fm_V_kp_work
+      TYPE(cp_fm_type), ALLOCATABLE, DIMENSION(:, :)     :: fm_V_kp
       TYPE(dbcsr_p_type), DIMENSION(:, :), POINTER       :: mat_V_kp
       TYPE(particle_type), DIMENSION(:), POINTER         :: particle_set
       TYPE(qs_kind_type), DIMENSION(:), POINTER          :: qs_kind_set
 
       CALL timeset(routineN, handle)
+
+      IF (bs_env%do_cd_lcg) THEN
+         CPASSERT(ikp_batch == 1 .AND. bs_env%kpoints_chi_eps_W%nkp == 1)
+         CALL cd_lcg_matrix_pair(bs_env, fm_V_kp, .TRUE., .TRUE.)
+         ALLOCATE (cfm_V_kp(1))
+         CALL cp_cfm_create(cfm_V_kp(1), bs_env%fm_RI_RI%matrix_struct)
+         CALL cp_fm_to_cfm(fm_V_kp(1, 1), fm_V_kp(1, 2), cfm_V_kp(1))
+         CALL cp_fm_release(fm_V_kp)
+         CALL timestop(handle)
+         RETURN
+      END IF
 
       nkp_chi_eps_W_batch = bs_env%nkp_chi_eps_W_batch
 
@@ -935,15 +960,34 @@ CONTAINS
       INTEGER                                            :: handle, info, n_RI
       TYPE(cp_cfm_type)                                  :: cfm_M_inv_ikp, cfm_work
       TYPE(cp_cfm_type), ALLOCATABLE, DIMENSION(:)       :: cfm_M_ikp
+      TYPE(cp_fm_type), ALLOCATABLE, DIMENSION(:, :)     :: fm_M_ikp
 
       CALL timeset(routineN, handle)
 
       n_RI = bs_env%n_RI
 
       ! get here M(k) and write it to cfm_M_ikp
-      CALL RI_2c_integral_mat_kp(qs_env, cfm_M_ikp, cfm_V_kp(ikp)%matrix_struct, n_RI, bs_env%ri_metric, &
-                                 bs_env%kpoints_chi_eps_W, regularization_RI=bs_env%regularization_RI, &
-                                 ikp_ext=ikp, do_build_cell_index=(ikp == 1))
+      IF (bs_env%do_cd_lcg) THEN
+         CPASSERT(ikp == 1 .AND. bs_env%kpoints_chi_eps_W%nkp == 1)
+         CALL cd_lcg_matrix_pair(bs_env, fm_M_ikp, .FALSE., .TRUE.)
+         ALLOCATE (cfm_M_ikp(1))
+         CALL cp_cfm_create(cfm_M_ikp(1), cfm_V_kp(ikp)%matrix_struct)
+         CALL cp_fm_to_cfm(fm_M_ikp(1, 1), fm_M_ikp(1, 2), cfm_M_ikp(1))
+         CALL cp_fm_release(fm_M_ikp)
+         ! Molecular MIC has exactly one image and unit phase. kpoint_create leaves a
+         ! (0:0,0:0) placeholder, which MIC would index as (1:3,1) out of bounds.
+         IF (ASSOCIATED(bs_env%kpoints_chi_eps_W%index_to_cell)) THEN
+            DEALLOCATE (bs_env%kpoints_chi_eps_W%index_to_cell)
+         END IF
+         ALLOCATE (bs_env%kpoints_chi_eps_W%index_to_cell(3, 1))
+         bs_env%kpoints_chi_eps_W%index_to_cell = 0
+         CPASSERT(SIZE(bs_env%kpoints_chi_eps_W%index_to_cell, 2) == 1)
+         CPASSERT(ALL(bs_env%kpoints_chi_eps_W%index_to_cell == 0))
+      ELSE
+         CALL RI_2c_integral_mat_kp(qs_env, cfm_M_ikp, cfm_V_kp(ikp)%matrix_struct, n_RI, bs_env%ri_metric, &
+                                    bs_env%kpoints_chi_eps_W, regularization_RI=bs_env%regularization_RI, &
+                                    ikp_ext=ikp, do_build_cell_index=(ikp == 1))
+      END IF
 
       IF (ikp == 1) THEN
          CALL cp_cfm_create(cfm_V_sqrt_ikp, cfm_V_kp(ikp)%matrix_struct)
@@ -1642,8 +1686,12 @@ CONTAINS
       CALL dbcsr_create(mat_Sigma_x_Gamma, template=bs_env%mat_ao_ao%matrix)
 
       ! 1. Compute truncated Coulomb operator matrix V^tr(k=0) (cutoff rad: cellsize/2)
-      CALL RI_2c_integral_mat(qs_env, fm_Vtr_Gamma, bs_env%fm_RI_RI%matrix_struct, bs_env%n_RI, &
-                              bs_env%trunc_coulomb)
+      IF (bs_env%do_cd_lcg) THEN
+         CALL cd_lcg_matrix_pair(bs_env, fm_Vtr_Gamma, .TRUE., .FALSE.)
+      ELSE
+         CALL RI_2c_integral_mat(qs_env, fm_Vtr_Gamma, bs_env%fm_RI_RI%matrix_struct, bs_env%n_RI, &
+                                 bs_env%trunc_coulomb)
+      END IF
 
       ! M^-1(k=0) V^tr M^-1(k=0) -> fm_Vtr_Gamma
       CALL fm_contract_ABA(bs_env%fm_Minv_Gamma, fm_Vtr_Gamma(:, 1))

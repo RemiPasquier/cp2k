@@ -2438,8 +2438,43 @@ CONTAINS
    END SUBROUTINE create_mp2_potential
 
 ! **************************************************************************************************
-!> \brief ...
-!> \param section ...
+!> \brief AO-pair Cholesky auxiliary controls.
+!> \param section Input section to create.
+   SUBROUTINE create_cd_section(section)
+      TYPE(section_type), POINTER :: section
+      TYPE(keyword_type), POINTER :: keyword
+
+      CPASSERT(.NOT. ASSOCIATED(section))
+      CALL section_create(section, __LOCATION__, name="CHOLESKY", &
+                          description="Build an auxiliary representation by Cholesky decomposition of full-Coulomb "// &
+                          "AO-pair integrals for nonperiodic quartic RI-RPA and its GW/BSE calculations. "// &
+                          "Requires a full-Coulomb RI metric and one OpenMP thread. "// &
+                          "Forces, k-points, low-scaling methods and DO_SVD are not supported.", &
+                          n_keywords=3, n_subsections=0, repeats=.FALSE.)
+      NULLIFY (keyword)
+      CALL keyword_create(keyword, __LOCATION__, name="_SECTION_PARAMETERS_", &
+                          description="Enable the AO-pair Cholesky auxiliary representation.", &
+                          default_l_val=.FALSE., lone_keyword_l_val=.TRUE.)
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+      CALL keyword_create(keyword, __LOCATION__, name="EPS_CHOLESKY", &
+                          description="Stop when the maximum remaining AO-pair residual diagonal is at most this "// &
+                          "fraction of the initial maximum exact diagonal. Must be greater than zero and less than one.", &
+                          default_r_val=1.0E-5_dp)
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+      CALL keyword_create(keyword, __LOCATION__, name="EPS_SCHWARZ", &
+                          description="Discard AO pairs whose Schwarz bound, from the exact pair diagonal and "// &
+                          "the initial maximum diagonal, is at most this threshold. Must be nonnegative. "// &
+                          "Integral screening within the retained pairs is disabled.", &
+                          default_r_val=1.0E-10_dp)
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+   END SUBROUTINE create_cd_section
+
+! **************************************************************************************************
+!> \brief Resolution-of-identity controls.
+!> \param section Input section to create.
 ! **************************************************************************************************
    SUBROUTINE create_ri_section(section)
       TYPE(section_type), POINTER                        :: section
@@ -2451,7 +2486,7 @@ CONTAINS
       CALL section_create(section, __LOCATION__, name="RI", &
                           description="Parameters influencing resolution of the identity (RI) that is "// &
                           "used in RI-MP2, RI-RPA, RI-SOS-MP2 and GW (inside RI-RPA).", &
-                          n_keywords=6, n_subsections=2, repeats=.FALSE.)
+                          n_keywords=6, n_subsections=3, repeats=.FALSE.)
 
       NULLIFY (subsection)
       CALL create_RI_metric_section(subsection)
@@ -2459,6 +2494,10 @@ CONTAINS
       CALL section_release(subsection)
 
       CALL create_opt_ri_basis(subsection)
+      CALL section_add_subsection(section, subsection)
+      CALL section_release(subsection)
+
+      CALL create_cd_section(subsection)
       CALL section_add_subsection(section, subsection)
       CALL section_release(subsection)
 

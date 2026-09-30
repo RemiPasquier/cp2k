@@ -128,6 +128,7 @@ Fist/regtest-5
 QS/regtest-acc-5-4                                          libint !ifx
 QS/regtest-nmr-uks-1
 QS/regtest-gw-realspace                                     libint !ifx
+QS/regtest-gw-cd-lcg                                        libint !ifx
 QS/regtest-dft-vdw-corr-3                                   libxc
 QS/regtest-admm-1                                           libint !ifx
 xTB/regtest-1

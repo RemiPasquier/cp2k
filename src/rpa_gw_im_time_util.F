@@ -755,6 +755,22 @@ CONTAINS
       TYPE(particle_type), DIMENSION(:), POINTER         :: particle_set
       TYPE(qs_kind_type), DIMENSION(:), POINTER          :: qs_kind_set
 
+      IF (basis_type == "RI_AUX" .AND. ASSOCIATED(qs_env%bs_env)) THEN
+         IF (qs_env%bs_env%do_cd_lcg) THEN
+            CPASSERT(ALL(qs_env%bs_env%periodic == 0))
+            CPASSERT(basis_size == SIZE(qs_env%bs_env%cd_lcg_owner))
+            ! The caller allocates both arrays, as for the Gaussian path below.
+            CPASSERT(SIZE(atom_from_basis_index) >= basis_size)
+            atom_from_basis_index(1:basis_size) = qs_env%bs_env%cd_lcg_owner(:)
+            IF (PRESENT(first_bf_from_atom)) THEN
+               natom = SIZE(qs_env%bs_env%i_RI_start_from_atom)
+               CPASSERT(SIZE(first_bf_from_atom) >= natom)
+               first_bf_from_atom(1:natom) = qs_env%bs_env%i_RI_start_from_atom(:)
+            END IF
+            RETURN
+         END IF
+      END IF
+
       NULLIFY (qs_kind_set, particle_set)
       CALL get_qs_env(qs_env, qs_kind_set=qs_kind_set, natom=natom, nkind=nkind, &
                       particle_set=particle_set)

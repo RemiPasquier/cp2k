@@ -68,14 +68,16 @@ CONTAINS
 !> \brief   Initialize all the atomic kind radii for a given threshold value.
 !> \param qs_control ...
 !> \param qs_kind_set ...
+!> \param skip_ri_aux Skip Gaussian RI_AUX radii for a product auxiliary backend.
 !> \date    24.09.2002
 !> \author  GT
 !> \version 1.0
 ! **************************************************************************************************
-   SUBROUTINE init_interaction_radii(qs_control, qs_kind_set)
+   SUBROUTINE init_interaction_radii(qs_control, qs_kind_set, skip_ri_aux)
 
       TYPE(qs_control_type), INTENT(IN)                  :: qs_control
       TYPE(qs_kind_type), DIMENSION(:), POINTER          :: qs_kind_set
+      LOGICAL, INTENT(IN), OPTIONAL                      :: skip_ri_aux
 
       CHARACTER(len=*), PARAMETER :: routineN = 'init_interaction_radii'
 
@@ -86,7 +88,7 @@ CONTAINS
       INTEGER, DIMENSION(1:15, 0:10)                     :: nrpot
       INTEGER, DIMENSION(:), POINTER                     :: nct_lpot, nct_lsd, nprj, nprj_ppnl
       LOGICAL                                            :: ecp_local, ecp_semi_local, llsd, lpot, &
-                                                            paw_atom
+                                                            paw_atom, use_ri_aux
       LOGICAL, DIMENSION(0:5)                            :: is_nonlocal
       REAL(KIND=dp) :: alpha_core_charge, alpha_ppl, ccore_charge, cerf_ppl, core_charge_radius, &
          cval, ppl_radius, ppnl_radius, rcprj, zeta
@@ -109,6 +111,8 @@ CONTAINS
       TYPE(sgp_potential_type), POINTER                  :: sgp_potential
 
       CALL timeset(routineN, handle)
+      use_ri_aux = .TRUE.
+      IF (PRESENT(skip_ri_aux)) use_ri_aux = .NOT. skip_ri_aux
 
       NULLIFY (all_potential, gth_potential, sgp_potential, cneo_potential)
       NULLIFY (aux_basis_set, aux_fit_basis_set, aux_gw_basis, tda_k_basis, &
@@ -131,7 +135,8 @@ CONTAINS
          CALL get_qs_kind(qs_kind_set(ikind), basis_set=lri_basis, basis_type="LRI_AUX")
          CALL get_qs_kind(qs_kind_set(ikind), basis_set=p_lri_basis, basis_type="P_LRI_AUX")
          CALL get_qs_kind(qs_kind_set(ikind), basis_set=ri_basis, basis_type="RI_HXC")
-         CALL get_qs_kind(qs_kind_set(ikind), basis_set=ri_aux_basis_set, basis_type="RI_AUX")
+         NULLIFY (ri_aux_basis_set)
+         IF (use_ri_aux) CALL get_qs_kind(qs_kind_set(ikind), basis_set=ri_aux_basis_set, basis_type="RI_AUX")
          CALL get_qs_kind(qs_kind_set(ikind), basis_set=mao_basis, basis_type="MAO")
          CALL get_qs_kind(qs_kind_set(ikind), basis_set=harris_basis, basis_type="HARRIS")
          CALL get_qs_kind(qs_kind_set(ikind), basis_set=aux_gw_basis, basis_type="AUX_GW")

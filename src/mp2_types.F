@@ -300,7 +300,14 @@ MODULE mp2_types
       INTEGER                                            :: max_parallel_comm = 0
    END TYPE grad_util
 
+   ! AO-pair Cholesky auxiliary controls.
+   TYPE mp2_cd_type
+      LOGICAL :: enabled = .FALSE.
+      REAL(dp) :: eps_cholesky = 1.0E-5_dp, eps_schwarz = 1.0E-10_dp
+   END TYPE mp2_cd_type
+
    TYPE mp2_type
+      TYPE(mp2_cd_type) :: cholesky = mp2_cd_type()
       INTEGER                                            :: method = mp2_method_none
       TYPE(mp2_laplace_type)                             :: ri_laplace = mp2_laplace_type()
       TYPE(mp2_direct_type)                              :: direct_canonical = mp2_direct_type()
