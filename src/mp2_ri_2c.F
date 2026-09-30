@@ -88,6 +88,7 @@ MODULE mp2_ri_2c
                                               mp_para_env_release,&
                                               mp_para_env_type,&
                                               mp_request_type
+   USE mp2_cd_producer,                 ONLY: cd_get_rank
    USE mp2_eri,                         ONLY: mp2_eri_2c_integrate
    USE mp2_eri_gpw,                     ONLY: mp2_eri_2c_integrate_gpw
    USE mp2_types,                       ONLY: integ_mat_buffer_type
@@ -1002,17 +1003,22 @@ CONTAINS
 
       CALL get_atomic_kind_set(atomic_kind_set, kind_of=kind_of)
 
-      DO ikind = 1, nkind
-         CALL get_qs_kind(qs_kind=qs_kind_set(ikind), basis_set=basis_set_a, basis_type="RI_AUX")
-         CPASSERT(ASSOCIATED(basis_set_a))
-      END DO
+      IF (qs_env%mp2_env%cholesky%enabled) THEN
+         dimen_RI = cd_get_rank()
+      ELSE
+         DO ikind = 1, nkind
+            CALL get_qs_kind(qs_kind=qs_kind_set(ikind), basis_set=basis_set_a, basis_type="RI_AUX")
+            CPASSERT(ASSOCIATED(basis_set_a))
+         END DO
 
-      dimen_RI = 0
-      DO iatom = 1, natom
-         ikind = kind_of(iatom)
-         CALL get_qs_kind(qs_kind=qs_kind_set(ikind), nsgf=nsgf, basis_type="RI_AUX")
-         dimen_RI = dimen_RI + nsgf
-      END DO
+         dimen_RI = 0
+         DO iatom = 1, natom
+            ikind = kind_of(iatom)
+            CALL get_qs_kind(qs_kind=qs_kind_set(ikind), nsgf=nsgf, basis_type="RI_AUX")
+            dimen_RI = dimen_RI + nsgf
+         END DO
+
+      END IF
 
       ! check that very small systems are not running on too many processes
       IF (dimen_RI < ngroup) THEN
@@ -1031,9 +1037,14 @@ CONTAINS
 
       potential_type = potential%potential_type
 
-      IF ((eri_method == do_eri_mme .OR. eri_method == do_eri_os) &
-          .AND. potential_type == do_potential_coulomb .OR. &
-          (eri_method == do_eri_mme .AND. potential_type == do_potential_long)) THEN
+      IF (qs_env%mp2_env%cholesky%enabled) THEN
+         ! Q := I. Retain all existing distribution, decomposition and inversion code.
+         DO iiB = 1, my_group_L_size
+            L_local_col(my_group_L_start + iiB - 1, iiB) = 1.0_dp
+         END DO
+      ELSE IF ((eri_method == do_eri_mme .OR. eri_method == do_eri_os) &
+               .AND. potential_type == do_potential_coulomb .OR. &
+               (eri_method == do_eri_mme .AND. potential_type == do_potential_long)) THEN
 
          CALL mp2_eri_2c_integrate(eri_param, potential, para_env_sub, qs_env, &
                                    basis_type_a="RI_AUX", basis_type_b="RI_AUX", &

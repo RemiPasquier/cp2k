@@ -362,6 +362,13 @@ MODULE post_scf_bandstructure_types
       CHARACTER(LEN=default_path_length)           :: prefix = ""
       INTEGER                                      :: unit_nr = -1
 
+      ! Raw pivot-product auxiliary backend for molecular large-cell Gamma GW.
+      LOGICAL :: do_cd_lcg = .FALSE., cd_lcg_T_ready = .FALSE.
+      REAL(dp) :: cd_lcg_eps = 1.0e-5_dp
+      INTEGER, ALLOCATABLE :: cd_lcg_mu(:), cd_lcg_nu(:), cd_lcg_owner(:), cd_lcg_order(:)
+      TYPE(cp_fm_type) :: cd_lcg_M, cd_lcg_V
+      TYPE(dbt_type) :: cd_lcg_T
+
       ! parameters and data for basis sets
       TYPE(gto_basis_set_p_type), &
          DIMENSION(:), ALLOCATABLE                 :: basis_set_AO, &
@@ -534,6 +541,8 @@ CONTAINS
       CALL cp_fm_release(bs_env%fm_work_mo(3))
       CALL cp_fm_release(bs_env%fm_work_mo(4))
       CALL cp_fm_release(bs_env%fm_RI_RI)
+      CALL cp_fm_release(bs_env%cd_lcg_M)
+      CALL cp_fm_release(bs_env%cd_lcg_V)
       CALL cp_fm_release(bs_env%fm_Minv_Gamma)
       CALL cp_fm_release(bs_env%fm_chi_Gamma_freq)
       CALL cp_fm_release(bs_env%fm_W_MIC_freq)
@@ -566,9 +575,12 @@ CONTAINS
       CALL safe_cfm_destroy_2d(bs_env%cfm_ks_kp)
       CALL safe_cfm_destroy_2d(bs_env%cfm_mo_coeff_kp)
 
+      CALL safe_dbt_destroy(bs_env%cd_lcg_T)
       CALL mp_para_env_release(bs_env%para_env)
       IF (ASSOCIATED(bs_env%para_env_tensor)) CALL mp_para_env_release(bs_env%para_env_tensor)
 
+      IF (ALLOCATED(bs_env%cd_lcg_mu)) DEALLOCATE (bs_env%cd_lcg_mu, bs_env%cd_lcg_nu, &
+                                                   bs_env%cd_lcg_owner, bs_env%cd_lcg_order)
       CALL safe_dbt_destroy(bs_env%t_G)
       CALL safe_dbt_destroy(bs_env%t_chi)
       CALL safe_dbt_destroy(bs_env%t_W)

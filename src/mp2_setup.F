@@ -346,6 +346,20 @@ CONTAINS
       CALL section_vals_val_get(mp2_section, "RI_MP2%NUMBER_INTEGRATION_GROUPS", i_val=mp2_env%ri_mp2%number_integration_groups)
       CALL section_vals_val_get(mp2_section, "RI_MP2%PRINT_DGEMM_INFO", l_val=mp2_env%ri_mp2%print_dgemm_info)
 
+      CALL section_vals_val_get(mp2_section, "RI%CHOLESKY%_SECTION_PARAMETERS_", &
+                                l_val=mp2_env%cholesky%enabled)
+      CALL section_vals_val_get(mp2_section, "RI%CHOLESKY%EPS_CHOLESKY", &
+                                r_val=mp2_env%cholesky%eps_cholesky)
+      IF (mp2_env%cholesky%enabled) THEN
+         IF (mp2_env%method /= ri_rpa_method_gpw .OR. mp2_env%do_im_time) THEN
+            CPABORT("CD_PRODUCER: only the quartic RI_RPA route is supported")
+         END IF
+         IF (.NOT. (mp2_env%cholesky%eps_cholesky > 0.0_dp .AND. &
+                    mp2_env%cholesky%eps_cholesky < 1.0_dp)) THEN
+            CPABORT("CD_PRODUCER: require 0 < EPS_CHOLESKY < 1")
+         END IF
+      END IF
+
       CALL section_vals_val_get(mp2_section, "RI%ROW_BLOCK", i_val=mp2_env%block_size_row)
       CALL section_vals_val_get(mp2_section, "RI%COL_BLOCK", i_val=mp2_env%block_size_col)
       CALL section_vals_val_get(mp2_section, "RI%CALC_COND_NUM", l_val=mp2_env%calc_PQ_cond_num)

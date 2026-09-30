@@ -65,6 +65,8 @@ MODULE mp2_gpw
                                               mp_para_env_type
    USE molecule_kind_types,             ONLY: molecule_kind_type
    USE molecule_types,                  ONLY: molecule_type
+   USE mp2_cd_producer,                 ONLY: cd_build_aux,&
+                                              cd_reserve_full_support
    USE mp2_cphf,                        ONLY: solve_z_vector_eq
    USE mp2_gpw_method,                  ONLY: mp2_gpw_compute
    USE mp2_integrals,                   ONLY: mp2_ri_gpw_compute_in
@@ -72,6 +74,7 @@ MODULE mp2_gpw
    USE mp2_ri_grad,                     ONLY: calc_ri_mp2_nonsep
    USE mp2_types,                       ONLY: mp2_type,&
                                               three_dim_real_array
+   USE omp_lib,                         ONLY: omp_get_max_threads
    USE particle_methods,                ONLY: get_particle_set
    USE particle_types,                  ONLY: particle_type
    USE qs_environment_types,            ONLY: get_qs_env,&
@@ -217,6 +220,18 @@ CONTAINS
          CPABORT("Full RPA k-points (DO_KPOINTS in LOW_SCALING section) not implemented with GW")
       END IF
 
+      IF (mp2_env%cholesky%enabled) THEN
+         IF (omp_get_max_threads() /= 1) CPABORT("CD_PRODUCER: requires one OpenMP thread")
+         IF (calc_forces) CPABORT("CD_PRODUCER: forces are not supported")
+         IF (.NOT. my_do_ri_rpa .OR. do_im_time) THEN
+            CPABORT("CD_PRODUCER: requires quartic RI_RPA")
+         END IF
+         IF (do_kpoints_cubic_RPA .OR. mp2_env%ri_rpa_im_time%do_kpoints_from_Gamma .OR. &
+             mp2_env%ri_g0w0%do_kpoints_Sigma) THEN
+            CPABORT("CD_PRODUCER: k-points are not supported")
+         END IF
+      END IF
+
       ! Get the number of spins
       nspins = SIZE(mos_mp2)
 
@@ -285,6 +300,20 @@ CONTAINS
          IF (mp2_env%ri_rpa_im_time%do_im_time_kpoints) mp2_env%eri_method = do_eri_os
          IF (calc_forces .AND. mp2_env%eri_method == do_eri_os) mp2_env%eri_method = do_eri_gpw
       END IF
+      IF (mp2_env%cholesky%enabled) THEN
+         IF (ANY(periodic /= 0)) THEN
+            CPABORT("CD_PRODUCER: only nonperiodic molecules are supported")
+         END IF
+         IF (mp2_env%potential_parameter%potential_type /= do_potential_coulomb) THEN
+            CPABORT("CD_PRODUCER: require full Coulomb INTERACTION_POTENTIAL")
+         END IF
+         IF (mp2_env%ri_metric%potential_type /= do_potential_coulomb) THEN
+            CPABORT("CD_CONSUMER: requires the full Coulomb RI metric")
+         END IF
+         IF (mp2_env%do_svd) CPABORT("CD_CONSUMER: DO_SVD is not supported")
+         ! The provider supplies analytic L and I; Gaussian engine selection is unused.
+         mp2_env%eri_method = do_eri_os
+      END IF
       eri_method = mp2_env%eri_method
 
       IF (unit_nr > 0 .AND. mp2_env%eri_method == do_eri_gpw) THEN
@@ -326,6 +355,10 @@ CONTAINS
                            blacs_env_sub_mat_munu, do_alloc_blocks_from_nbl=.NOT. do_im_time, sab_orb_sub=sab_orb_sub, &
                            do_kpoints=mp2_env%ri_rpa_im_time%do_im_time_kpoints, &
                            dbcsr_sym_type=dbcsr_type_symmetric)
+      IF (mp2_env%cholesky%enabled) THEN
+         ! CD columns have full ORB support, independent of EPS_GRID neighbour lists.
+         CALL cd_reserve_full_support(mat_munu%matrix)
+      END IF
 
       ! which RI metric we want to have
       ri_metric_type = mp2_env%ri_metric%potential_type
@@ -380,6 +413,10 @@ CONTAINS
       Emp2_S = 0.0_dp
       Emp2_T = 0.0_dp
       IF (my_do_ri_mp2 .OR. my_do_ri_rpa .OR. my_do_ri_sos_laplace_mp2) THEN
+         IF (mp2_env%cholesky%enabled) THEN
+            IF (calc_forces) CPABORT("CD_PRODUCER: forces are not supported")
+            CALL cd_build_aux(qs_env, mp2_env, para_env, unit_nr)
+         END IF
          ! RI-GPW integrals (same stuff for both RPA and MP2)
          IF (nspins == 2) THEN
             ! open shell case (RI) here the (ia|K) integrals are computed for both the alpha and beta components
@@ -1005,7 +1042,7 @@ CONTAINS
       INTEGER, DIMENSION(:), POINTER                     :: col_blk_sizes, row_blk_sizes
       LOGICAL                                            :: my_do_alloc_blocks_from_nbl, &
                                                             my_do_kpoints, my_do_mixed_basis, &
-                                                            my_do_ri_aux_basis
+                                                            my_do_ri_aux_basis, skip_ri_aux
       LOGICAL, ALLOCATABLE, DIMENSION(:)                 :: orb_present
       REAL(dp), ALLOCATABLE, DIMENSION(:)                :: orb_radius
       REAL(dp), ALLOCATABLE, DIMENSION(:, :)             :: pair_radius
@@ -1076,7 +1113,13 @@ CONTAINS
       dft_control%qs_control%eps_pgf_orb = eps_grid
       dft_control%qs_control%eps_rho_rspace = eps_grid
       dft_control%qs_control%eps_gvg_rspace = eps_grid
-      CALL init_interaction_radii(dft_control%qs_control, qs_kind_set)
+      skip_ri_aux = .FALSE.
+      IF (ASSOCIATED(qs_env%bs_env)) skip_ri_aux = qs_env%bs_env%do_cd_lcg
+      IF (skip_ri_aux) THEN
+         CALL init_interaction_radii(dft_control%qs_control, qs_kind_set, skip_ri_aux=.TRUE.)
+      ELSE
+         CALL init_interaction_radii(dft_control%qs_control, qs_kind_set)
+      END IF
 
       ! get a distribution_1d
       NULLIFY (local_particles_sub, local_molecules_sub)

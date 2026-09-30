@@ -2406,7 +2406,7 @@ CONTAINS
                           "For the GW algorithm for molecules, see "// &
                           "<https://doi.org/10.1021/acs.jctc.0c01282>. "// &
                           "For 2D materials, see <https://doi.org/10.1021/acs.jctc.3c01230>.", &
-                          n_keywords=1, n_subsections=4, repeats=.FALSE.)
+                          n_keywords=1, n_subsections=5, repeats=.FALSE.)
 
       NULLIFY (keyword)
       CALL keyword_create(keyword, __LOCATION__, &
@@ -2463,7 +2463,7 @@ CONTAINS
                           "Coulomb operator. The larger the cutoff radius, the faster "// &
                           "converges the resolution of the identity (RI) with respect to the "// &
                           "RI basis set size. Larger cutoff radius means higher computational "// &
-                          "cost.", &
+                          "cost. With &CHOLESKY the default is 10 Angstrom.", &
                           usage="CUTOFF_RADIUS_RI 3.0", &
                           default_r_val=cp_unit_to_cp2k(value=3.0_dp, unit_str="angstrom"), &
                           type_of_var=real_t, unit_str="angstrom")
@@ -2579,6 +2579,24 @@ CONTAINS
 
       NULLIFY (subsection)
       CALL create_evgw0_section(subsection)
+      CALL section_add_subsection(section, subsection)
+      CALL section_release(subsection)
+
+      NULLIFY (subsection)
+      CALL section_create(subsection, __LOCATION__, name="CHOLESKY", &
+                          description="Raw full-Coulomb CD pivot products for molecular large-cell Gamma GW. "// &
+                          "No RI_AUX basis is required. Requires one OpenMP thread; GW restarts are disabled.", &
+                          n_keywords=2, n_subsections=0, repeats=.FALSE.)
+      CALL keyword_create(keyword, __LOCATION__, name="_SECTION_PARAMETERS_", &
+                          description="Enable CD product auxiliaries.", &
+                          default_l_val=.FALSE., lone_keyword_l_val=.TRUE.)
+      CALL section_add_keyword(subsection, keyword)
+      CALL keyword_release(keyword)
+      CALL keyword_create(keyword, __LOCATION__, name="EPS_CHOLESKY", &
+                          description="Full-Coulomb residual threshold relative to the initial maximum diagonal.", &
+                          default_r_val=1.0e-5_dp)
+      CALL section_add_keyword(subsection, keyword)
+      CALL keyword_release(keyword)
       CALL section_add_subsection(section, subsection)
       CALL section_release(subsection)
 

@@ -1016,7 +1016,7 @@ CONTAINS
       INTEGER, DIMENSION(5)                              :: ngaussflex, occ
       INTEGER, DIMENSION(:), POINTER                     :: mo_index_range
       LOGICAL :: all_potential_present, be_silent, cneo_potential_present, do_kpoints, do_ri_hfx, &
-         do_ri_mp2, do_ri_rpa, do_ri_sos_mp2, do_rpa_ri_exx, do_wfc_im_time, e1terms, &
+         do_ri_mp2, do_ri_rpa, do_ri_sos_mp2, do_rpa_ri_exx, do_wfc_cd, do_wfc_im_time, e1terms, &
          has_unit_metric, lribas, mp2_present, orb_gradient, paw_atom
       REAL(KIND=dp)                                      :: alpha, ccore, ewald_rcut, fxx, maxocc, &
                                                             rc, rcut, total_zeff_corr, &
@@ -1488,7 +1488,9 @@ CONTAINS
          CALL section_vals_val_get(qs_env%input, "DFT%XC%WF_CORRELATION%RI_MP2%_SECTION_PARAMETERS_", l_val=do_ri_mp2)
          CALL section_vals_val_get(qs_env%input, "DFT%XC%WF_CORRELATION%RI_SOS_MP2%_SECTION_PARAMETERS_", l_val=do_ri_sos_mp2)
          CALL section_vals_val_get(qs_env%input, "DFT%XC%WF_CORRELATION%RI_RPA%_SECTION_PARAMETERS_", l_val=do_ri_rpa)
-         IF (do_ri_mp2 .OR. do_ri_sos_mp2 .OR. do_ri_rpa) THEN
+         CALL section_vals_val_get(qs_env%input, "DFT%XC%WF_CORRELATION%RI%CHOLESKY%_SECTION_PARAMETERS_", &
+                                   l_val=do_wfc_cd)
+         IF ((do_ri_mp2 .OR. do_ri_sos_mp2 .OR. do_ri_rpa) .AND. .NOT. do_wfc_cd) THEN
             DO ikind = 1, nkind
                NULLIFY (ri_aux_basis_set)
                qs_kind => qs_kind_set(ikind)

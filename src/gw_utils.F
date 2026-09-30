@@ -61,11 +61,16 @@ MODULE gw_utils
    USE distribution_2d_types,           ONLY: distribution_2d_type
    USE gw_auto_ri_generate_RI_basis,    ONLY: generate_auto_ri_basis
    USE gw_auto_ri_types,                ONLY: auto_ri_type
+   USE gw_cd_lcg,                       ONLY: cd_lcg_build_T,&
+                                              cd_lcg_get_T,&
+                                              cd_lcg_metrics,&
+                                              cd_lcg_select
    USE gw_utils_communication,          ONLY: fm_to_local_array
    USE gw_utils_compute_integrals,      ONLY: build_3c_integral_block
    USE gw_utils_fm,                     ONLY: cfm_contract_ABA,&
                                               fm_invert,&
                                               local_complex_power
+   USE ieee_arithmetic,                 ONLY: ieee_is_finite
    USE input_constants,                 ONLY: &
         G0W0, do_potential_coulomb, do_potential_truncated, evGW0, ri_rpa_g0w0_crossing_newton, &
         ri_rs_large_cell_Gamma, ri_rs_non_periodic, rtp_bse_kernel_ri_ao, rtp_bse_kernel_ri_rs, &
@@ -179,6 +184,8 @@ CONTAINS
       CALL cp_libint_static_init()
       IF (bs_env%auto_ri%enabled) CALL generate_auto_ri_basis(qs_env, bs_env)
 
+      IF (bs_env%do_cd_lcg) CALL cd_lcg_select(qs_env, bs_env)
+
       CALL get_RI_basis(qs_env, bs_env)
 
       CALL compute_V_xc(qs_env, bs_env)
@@ -200,6 +207,7 @@ CONTAINS
       CASE (tensor_large_cell_Gamma, ri_rs_large_cell_Gamma, ri_rs_non_periodic)
 
          IF (.NOT. bs_env%do_gw_ri_rs) THEN
+            IF (bs_env%do_cd_lcg) CALL cd_lcg_build_T(qs_env, bs_env)
             CALL check_sparsity_3c(qs_env, bs_env)
 
             CALL set_sparsity_parallelization_parameters(bs_env)
@@ -272,9 +280,10 @@ CONTAINS
       CHARACTER(LEN=*), PARAMETER :: routineN = 'read_gw_input_parameters'
 
       INTEGER                                            :: handle
-      LOGICAL                                            :: do_evgw0
-      TYPE(section_vals_type), POINTER                   :: auto_ri_sec, evgw0_sec, grid_opt_sec, &
-                                                            gw_sec, ri_rs_sec
+      LOGICAL                                            :: cutoff_ri_explicit, do_evgw0, &
+                                                            eps_filter_explicit
+      TYPE(section_vals_type), POINTER                   :: auto_ri_sec, cd_sec, evgw0_sec, &
+                                                            grid_opt_sec, gw_sec, ri_rs_sec
 
       CALL timeset(routineN, handle)
 
@@ -284,6 +293,9 @@ CONTAINS
       evgw0_sec => section_vals_get_subs_vals(gw_sec, "EVGW0")
       ri_rs_sec => section_vals_get_subs_vals(gw_sec, "RI_RS")
       grid_opt_sec => section_vals_get_subs_vals(ri_rs_sec, "GRID_OPTIMIZATION")
+      cd_sec => section_vals_get_subs_vals(gw_sec, "CHOLESKY")
+      CALL section_vals_val_get(cd_sec, "_SECTION_PARAMETERS_", l_val=bs_env%do_cd_lcg)
+      CALL section_vals_val_get(cd_sec, "EPS_CHOLESKY", r_val=bs_env%cd_lcg_eps)
 
       CALL section_vals_val_get(gw_sec, "NUM_TIME_FREQ_POINTS", i_val=bs_env%num_time_freq_points)
       CALL section_vals_val_get(gw_sec, "EPS_FILTER", r_val=bs_env%eps_filter)
@@ -300,6 +312,47 @@ CONTAINS
       CALL read_rirs_grid_opt(bs_env%ri_rs, grid_opt_sec)
       CALL read_evgw0_input(bs_env%ri_rs, evgw0_sec, do_evgw0)
       CALL read_auto_ri_input(bs_env%auto_ri, auto_ri_sec)
+      IF (bs_env%do_cd_lcg) THEN
+         ! Raw pivot products need tighter filtering than Gaussian auxiliaries to avoid
+         ! filter errors dominating convergence with the Cholesky threshold.
+         CALL section_vals_val_get(gw_sec, "EPS_FILTER", explicit=eps_filter_explicit)
+         IF (.NOT. eps_filter_explicit) bs_env%eps_filter = 1.0E-11_dp
+         ! Raw pivot products need a longer-range fitting metric than Gaussian auxiliaries
+         ! to limit exchange errors and artificial splitting of degenerate levels.
+         ! Keep an explicitly requested fitting cutoff.
+         CALL section_vals_val_get(gw_sec, "CUTOFF_RADIUS_RI", explicit=cutoff_ri_explicit)
+         IF (.NOT. cutoff_ri_explicit) bs_env%ri_metric%cutoff_radius = 10.0_dp/angstrom
+         IF (bs_env%n_atom > 72) THEN
+            CPABORT("CD_LCG: molecular cache is restricted to at most 72 atoms")
+         END IF
+         IF (.NOT. ieee_is_finite(bs_env%ri_metric%cutoff_radius) .OR. &
+             .NOT. ieee_is_finite(bs_env%eps_filter) .OR. &
+             .NOT. ieee_is_finite(bs_env%input_regularization_RI)) THEN
+            CPABORT("CD_LCG: nonfinite GW input")
+         END IF
+         IF (ANY(bs_env%periodic /= 0)) THEN
+            CPABORT("CD_LCG: only NON-PERIODIC molecules are supported")
+         END IF
+         IF (bs_env%do_gw_ri_rs) CPABORT("CD_LCG: RI-RS is incompatible with CHOLESKY")
+         IF (bs_env%auto_ri%enabled) CPABORT("CD_LCG: AUTO_RI is incompatible with CHOLESKY")
+         IF (bs_env%gw_implementation /= tensor_large_cell_Gamma) THEN
+            CPABORT("CD_LCG: only the LARGE-CELL Gamma TENSOR GW route is supported")
+         END IF
+         IF (bs_env%rtp_method == rtp_method_bse .OR. bs_env%rtp_method == rtp_method_bse_linearized) THEN
+            CPABORT("CD_LCG: RT-BSE is not supported")
+         END IF
+         IF (do_evgw0) CPABORT("CD_LCG: evGW0 is not supported by the tensor route")
+         IF (bs_env%ri_rs%grid_opt%enabled) THEN
+            CPABORT("CD_LCG: RI-RS grid optimization is incompatible")
+         END IF
+         IF (.NOT. (bs_env%ri_metric%cutoff_radius > 0.0_dp)) THEN
+            CPABORT("CD_LCG: CUTOFF_RADIUS_RI must be positive")
+         END IF
+         IF (.NOT. (bs_env%eps_filter > 0.0_dp)) CPABORT("CD_LCG: EPS_FILTER must be positive")
+         IF (bs_env%input_regularization_RI > 0.0_dp) THEN
+            CPABORT("CD_LCG: REGULARIZATION_RI must be zero or the molecular default")
+         END IF
+      END IF
       CALL check_gw_input(bs_env, do_evgw0)
 
       CALL timestop(handle)
@@ -709,11 +762,12 @@ CONTAINS
       ALLOCATE (bs_env%sizes_RI(natom), bs_env%sizes_AO(natom))
       ALLOCATE (bs_env%basis_set_RI(nkind), bs_env%basis_set_AO(nkind))
 
-      CALL basis_set_list_setup(bs_env%basis_set_RI, "RI_AUX", qs_kind_set)
       CALL basis_set_list_setup(bs_env%basis_set_AO, "ORB", qs_kind_set)
-
-      CALL get_particle_set(particle_set, qs_kind_set, nsgf=bs_env%sizes_RI, &
-                            basis=bs_env%basis_set_RI)
+      IF (.NOT. bs_env%do_cd_lcg) THEN
+         CALL basis_set_list_setup(bs_env%basis_set_RI, "RI_AUX", qs_kind_set)
+         CALL get_particle_set(particle_set, qs_kind_set, nsgf=bs_env%sizes_RI, &
+                               basis=bs_env%basis_set_RI)
+      END IF
       CALL get_particle_set(particle_set, qs_kind_set, nsgf=bs_env%sizes_AO, &
                             basis=bs_env%basis_set_AO)
 
@@ -879,10 +933,12 @@ CONTAINS
 
       CALL get_atomic_kind_set(atomic_kind_set, kind_of=kind_of)
 
-      DO ikind = 1, n_kind
-         CALL get_qs_kind(qs_kind_set(ikind), basis_set=basis, basis_type="RI_AUX")
-         CPASSERT(ASSOCIATED(basis))
-      END DO
+      IF (.NOT. bs_env%do_cd_lcg) THEN
+         DO ikind = 1, n_kind
+            CALL get_qs_kind(qs_kind_set(ikind), basis_set=basis, basis_type="RI_AUX")
+            CPASSERT(ASSOCIATED(basis))
+         END DO
+      END IF
 
       ALLOCATE (bs_env%i_RI_start_from_atom(n_atom))
       ALLOCATE (bs_env%i_RI_end_from_atom(n_atom))
@@ -912,7 +968,10 @@ CONTAINS
 
       u = bs_env%unit_nr
       ALLOCATE (bs_env%l_RI(n_RI), source=-1)
-      IF (bs_env%auto_ri%enabled) THEN
+      IF (bs_env%do_cd_lcg) THEN
+         CPASSERT(SUM(bs_env%periodic) == 0 .AND. ALL(bs_env%periodic == 0))
+         bs_env%l_RI = 0
+      ELSE IF (bs_env%auto_ri%enabled) THEN
          CPASSERT(bs_env%auto_ri%ready)
       ELSE
          i_RI = 0
@@ -1737,8 +1796,13 @@ CONTAINS
          CALL create_mat_munu(bs_env%mat_ao_ao_tensor, qs_env, bs_env%eps_atom_grid_2d_mat, &
                               blacs_env_tensor, do_ri_aux_basis=.FALSE.)
 
-         CALL create_mat_munu(bs_env%mat_RI_RI_tensor, qs_env, bs_env%eps_atom_grid_2d_mat, &
-                              blacs_env_tensor, do_ri_aux_basis=.TRUE.)
+         IF (bs_env%do_cd_lcg) THEN
+            CALL create_mat_munu(bs_env%mat_RI_RI_tensor, qs_env, bs_env%eps_atom_grid_2d_mat, &
+                                 blacs_env_tensor, do_ri_aux_basis=.TRUE., custom_row_blk_sizes=bs_env%sizes_RI)
+         ELSE
+            CALL create_mat_munu(bs_env%mat_RI_RI_tensor, qs_env, bs_env%eps_atom_grid_2d_mat, &
+                                 blacs_env_tensor, do_ri_aux_basis=.TRUE.)
+         END IF
 
          CALL cp_blacs_env_release(blacs_env_tensor)
       END IF
@@ -1778,7 +1842,11 @@ CONTAINS
       CALL timeset(routineN, handle)
 
       CALL cp_fm_create(bs_env%fm_Minv_Gamma, bs_env%fm_RI_RI%matrix_struct)
-      IF (bs_env%auto_ri%enabled) THEN
+      IF (bs_env%do_cd_lcg) THEN
+         CALL cd_lcg_metrics(qs_env, bs_env)
+         CALL cp_fm_to_fm(bs_env%cd_lcg_M, bs_env%fm_Minv_Gamma)
+         CALL fm_invert(bs_env%fm_Minv_Gamma, 0.0_dp, bs_env%unit_nr)
+      ELSE IF (bs_env%auto_ri%enabled) THEN
          CPASSERT(bs_env%auto_ri%ready)
          CALL cp_fm_to_fm(bs_env%auto_ri%M_pq_inv, bs_env%fm_Minv_Gamma)
       ELSE
@@ -1955,8 +2023,10 @@ CONTAINS
          orb_basis => bs_env%basis_set_AO(ibasis)%gto_basis_set
          CALL init_interaction_radii_orb_basis(orb_basis, bs_env%eps_filter)
 
-         ri_basis => bs_env%basis_set_RI(ibasis)%gto_basis_set
-         CALL init_interaction_radii_orb_basis(ri_basis, bs_env%eps_filter)
+         IF (.NOT. bs_env%do_cd_lcg) THEN
+            ri_basis => bs_env%basis_set_RI(ibasis)%gto_basis_set
+            CALL init_interaction_radii_orb_basis(ri_basis, bs_env%eps_filter)
+         END IF
 
       END DO
 
@@ -1983,7 +2053,7 @@ CONTAINS
       ! with the standard atomic blocks
       CALL create_3c_t(bs_env%t_RI_AO__AO, bs_env%para_env_tensor, "(RI AO | AO)", [1, 2], [3], &
                        bs_env%sizes_RI, bs_env%sizes_AO, &
-                       create_nl_3c=.TRUE., nl_3c=bs_env%nl_3c, qs_env=qs_env)
+                       create_nl_3c=.NOT. bs_env%do_cd_lcg, nl_3c=bs_env%nl_3c, qs_env=qs_env)
       CALL create_3c_t(bs_env%t_RI__AO_AO, bs_env%para_env_tensor, "(RI | AO AO)", [1], [2, 3], &
                        bs_env%sizes_RI, bs_env%sizes_AO)
 
@@ -2149,17 +2219,22 @@ CONTAINS
       ! do not compute full 3c integrals at once because it may cause out of memory
       DO RI_atom = 1, bs_env%n_atom, n_atom_step
 
-         CALL build_3c_integrals(t_3c_global_array, &
-                                 bs_env%eps_filter, &
-                                 qs_env, &
-                                 bs_env%nl_3c, &
-                                 int_eps=bs_env%eps_filter, &
-                                 basis_i=bs_env%basis_set_RI, &
-                                 basis_j=bs_env%basis_set_AO, &
-                                 basis_k=bs_env%basis_set_AO, &
-                                 bounds_i=[RI_atom, MIN(RI_atom + n_atom_step - 1, bs_env%n_atom)], &
-                                 potential_parameter=bs_env%ri_metric, &
-                                 desymmetrize=.FALSE.)
+         IF (bs_env%do_cd_lcg) THEN
+            CALL cd_lcg_get_T(bs_env, t_3c_global_array(1, 1), &
+                              atoms_RI=[RI_atom, MIN(RI_atom + n_atom_step - 1, bs_env%n_atom)])
+         ELSE
+            CALL build_3c_integrals(t_3c_global_array, &
+                                    bs_env%eps_filter, &
+                                    qs_env, &
+                                    bs_env%nl_3c, &
+                                    int_eps=bs_env%eps_filter, &
+                                    basis_i=bs_env%basis_set_RI, &
+                                    basis_j=bs_env%basis_set_AO, &
+                                    basis_k=bs_env%basis_set_AO, &
+                                    bounds_i=[RI_atom, MIN(RI_atom + n_atom_step - 1, bs_env%n_atom)], &
+                                    potential_parameter=bs_env%ri_metric, &
+                                    desymmetrize=.FALSE.)
+         END IF
 
          CALL dbt_filter(t_3c_global_array(1, 1), bs_env%eps_filter)
 
@@ -2354,6 +2429,9 @@ CONTAINS
                                 *bs_env%group_size_tensor/24/bs_env%n_RI &
                                 /SQRT(bs_env%occupation_3c_int)))/bs_env%max_AO_bf_per_atom
 
+      IF (bs_env%do_cd_lcg .AND. n_atom_per_ivl < 1) THEN
+         CPABORT("CD_LCG: MEMORY_PER_PROC too small for one outer atom interval")
+      END IF
       n_intervals_i = (bs_env%n_atom_i - 1)/n_atom_per_ivl + 1
       n_intervals_j = (bs_env%n_atom_j - 1)/n_atom_per_ivl + 1
 
@@ -2394,6 +2472,9 @@ CONTAINS
                                   /bs_env%n_RI/8/SQRT(bs_env%occupation_3c_int) &
                                   /bs_env%max_AO_bf_per_atom), bs_env%n_atom)
 
+      IF (bs_env%do_cd_lcg .AND. n_atom_per_IL_ivl < 1) THEN
+         CPABORT("CD_LCG: MEMORY_PER_PROC too small for one inner atom interval")
+      END IF
       n_intervals_inner_loop_atoms = (bs_env%n_atom - 1)/n_atom_per_IL_ivl + 1
 
       bs_env%n_intervals_inner_loop_atoms = n_intervals_inner_loop_atoms
@@ -2455,6 +2536,20 @@ CONTAINS
       project_name = cp_print_key_generate_filename(logger, print_key, extension="", &
                                                     my_local=.FALSE.)
       WRITE (prefix, '(2A)') TRIM(project_name), "-RESTART_"
+      IF (bs_env%do_cd_lcg) THEN
+         ! No unverified auxiliary identity may enter through chi, W or Sigma files.
+         ! fm_write also disables writes; retain an isolated namespace defensively.
+         WRITE (prefix, '(2A)') TRIM(project_name), "-CD_LCG-RESTART_"
+         bs_env%prefix = prefix
+         bs_env%read_chi = .FALSE.
+         bs_env%calc_chi = .TRUE.
+         bs_env%Sigma_c_exists = .FALSE.
+         bs_env%Sigma_x_exists = .FALSE.
+         bs_env%all_W_exist = .FALSE.
+         IF (bs_env%unit_nr > 0) WRITE (bs_env%unit_nr, '(A)') 'CD_LCG| restart_read_write disabled'
+         CALL timestop(handle)
+         RETURN
+      END IF
       bs_env%prefix = prefix
 
       bs_env%all_W_exist = .TRUE.
