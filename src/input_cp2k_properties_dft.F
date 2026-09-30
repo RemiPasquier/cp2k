@@ -2867,6 +2867,59 @@ CONTAINS
       CALL section_add_keyword(section, keyword)
       CALL keyword_release(keyword)
 
+      CALL keyword_create( &
+         keyword, __LOCATION__, name="NUM_CLUSTER_GROUPS", &
+         description="Number of equally sized rank groups evaluating whole atomic clusters. "// &
+         "Zero (the default) uses one rank per group. Fewer groups can be faster for some workloads. "// &
+         "One uses all ranks together; the rank count uses one rank per group. "// &
+         "Positive values select that many groups, rounded down to a divisor of the rank count "// &
+         "with a warning if necessary. Groups with multiple ranks distribute AO-pair contractions "// &
+         "and solve columns; single-rank groups use the single-rank evaluator. "// &
+         "Grids and integrals remain replicated within each group. Negative values are invalid.", &
+         usage="NUM_CLUSTER_GROUPS 0", default_i_val=0)
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+
+      CALL keyword_create( &
+         keyword, __LOCATION__, name="SAVE_GRID_FILE_NAME", &
+         description="If set, the RI-RS grid is written to this file once it has been built. The file "// &
+         "stores the atom-relative grid of every atom together with the atom positions, the AO and RI "// &
+         "basis set definitions, the cell and RS_AO_RATIO, CUTOFF_ATOMIC_CLUSTER, the RI metric cutoff "// &
+         "radius and TIKHONOV, so that a later run of the same system can reuse it with "// &
+         "READ_GRID_FILE_NAME. It also records the mode, MAX_ITER and EPS_FILTER of the writing run for "// &
+         "information; re-saving a read grid does not preserve its original optimization settings. "// &
+         "Saving is not supported if an element symbol or an AO or RI basis name contains a double quote.", &
+         usage="SAVE_GRID_FILE_NAME H2O.rirs_grid", default_lc_val="")
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+
+      CALL keyword_create( &
+         keyword, __LOCATION__, name="READ_GRID_FILE_NAME", &
+         description="If set, the RI-RS grid is read from this file, written by SAVE_GRID_FILE_NAME. "// &
+         "Without WARM_START the grid is used unchanged and the grid optimization is skipped. CP2K stops "// &
+         "unless atom and kind counts, the kind of every atom, the element of every kind, AO and RI basis "// &
+         "names and definitions, cell and periodicity, RS_AO_RATIO, CUTOFF_ATOMIC_CLUSTER, the RI metric "// &
+         "cutoff radius and TIKHONOV match the writing run. Numerical values satisfy "// &
+         "abs(file - run) <= 1e-12 * max(1, abs(run)); every atomic-position component must agree within "// &
+         "1e-8 bohr. MAX_ITER may differ. With WARM_START optimization starts from the read grid; see WARM_START.", &
+         usage="READ_GRID_FILE_NAME H2O.rirs_grid", default_lc_val="")
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+
+      CALL keyword_create( &
+         keyword, __LOCATION__, name="WARM_START", &
+         description="Start the grid optimization from the grid read with READ_GRID_FILE_NAME instead of "// &
+         "skipping it. The atom and kind counts, the kind of every atom and the element of every kind "// &
+         "must match the writing run. Each atom's point count must be in the allowed range and match its "// &
+         "newly initialized grid. Atom positions may differ without a warning; the largest component "// &
+         "displacement is printed. Differences in periodicity, cell, AO and RI basis names and definitions, "// &
+         "RS_AO_RATIO, CUTOFF_ATOMIC_CLUSTER, the RI metric cutoff radius and TIKHONOV produce warnings. "// &
+         "The read grid is only the starting point; its points move with their atoms, and MAX_ITER limits "// &
+         "the number of evaluations as usual.", &
+         usage="WARM_START", default_l_val=.FALSE., lone_keyword_l_val=.TRUE.)
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+
    END SUBROUTINE create_ri_rs_grid_optimization_section
 
 ! **************************************************************************************************

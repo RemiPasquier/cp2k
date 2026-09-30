@@ -13,6 +13,8 @@
 MODULE gw_ri_rs_grid_setup_main
    USE gw_ri_rs_grid_from_file,         ONLY: read_ri_rs_grid_from_file
    USE gw_ri_rs_grid_optimization,      ONLY: optimize_ri_rs_grid
+   USE gw_ri_rs_grid_restart,           ONLY: read_ri_rs_grid_restart,&
+                                              write_ri_rs_grid_restart
    USE kinds,                           ONLY: dp,&
                                               int_8
    USE particle_types,                  ONLY: particle_type
@@ -39,7 +41,22 @@ CONTAINS
       TYPE(post_scf_bandstructure_type), POINTER         :: bs_env
       REAL(KIND=dp), ALLOCATABLE, INTENT(OUT)            :: grid_points(:, :)
 
-      IF (bs_env%ri_rs%grid_opt%enabled) THEN
+      CHARACTER(LEN=32)                                  :: mode
+
+      IF (bs_env%ri_rs%grid_opt%enabled .AND. LEN_TRIM(bs_env%ri_rs%grid_opt%read_file) > 0 .AND. &
+          .NOT. bs_env%ri_rs%grid_opt%warm_start) THEN
+
+         ! Reuse a grid written by an earlier run of the same system (READ_GRID_FILE_NAME).
+         IF (ALLOCATED(bs_env%ri_rs%atomic_grids)) DEALLOCATE (bs_env%ri_rs%atomic_grids)
+         CALL read_ri_rs_grid_restart(bs_env, TRIM(bs_env%ri_rs%grid_opt%read_file), .TRUE., &
+                                      bs_env%ri_rs%atomic_grids)
+         ! A new grid invalidates any stored Z_lP, as after an optimization.
+         bs_env%ri_rs%Z_lP_exists = .FALSE.
+         mode = "read"
+         IF (bs_env%unit_nr > 0) WRITE (bs_env%unit_nr, "(T2,A,I0)") &
+            "RI-RS grid reused without optimization, points: ", SUM(bs_env%ri_rs%atomic_grids(:)%npts)
+
+      ELSE IF (bs_env%ri_rs%grid_opt%enabled) THEN
 
          ! Initialize Lebedev grids for every element from CP2K routines and then
          ! optimize the coordinates of these grid points to minimize the RIRS error
@@ -47,12 +64,19 @@ CONTAINS
          ! [(μν|P) - Σ_l ϕ_μ(r_l) ϕ_ν(r_l) Z_lP^(A)]²
          !
          CALL optimize_ri_rs_grid(bs_env)
+         mode = "optimized"
+         IF (bs_env%ri_rs%grid_opt%warm_start) mode = "optimized-warm-start"
 
       ELSE
 
          ! Read pretabulated atom-relative RI-RS grids from the data files
          CALL read_ri_rs_grid_from_file(bs_env)
+         mode = "pretabulated"
 
+      END IF
+
+      IF (bs_env%ri_rs%grid_opt%enabled .AND. LEN_TRIM(bs_env%ri_rs%grid_opt%save_file) > 0) THEN
+         CALL write_ri_rs_grid_restart(bs_env, TRIM(bs_env%ri_rs%grid_opt%save_file), TRIM(mode))
       END IF
 
       ! Move atom-relative grids to their atomic centres and collect the global grid.
