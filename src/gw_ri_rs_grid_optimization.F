@@ -326,7 +326,9 @@ CONTAINS
                           normalized_error, coordinate_gradient, &
                           max_abs_error, fit_successful)
 
-      IF (.NOT. fit_successful) CPABORT("RI-RS grid optimization produced no regularized fit")
+      IF (.NOT. fit_successful) THEN
+         CPABORT("RI-RS grid optimization produced no regularized fit")
+      END IF
 
       DO iatom = 1, SIZE(bs_env%ri_rs%atomic_grids)
          bs_env%ri_rs%atomic_grids(iatom)%npts = &
@@ -371,8 +373,8 @@ CONTAINS
       INTEGER :: handle, i_cluster_atom_j, i_cluster_atom_k, i_cluster_atom_p, iatom, iatom_j, &
          iatom_k, iatom_p, icenter_atom, icluster_atom, ikind, ilocal_cluster, ip, &
          n_local_clusters, nAO_cluster, nRI_cluster, nRI_nonzero
-      INTEGER, ALLOCATABLE                               :: AO_offset(:), RI_offset(:), &
-                                                            sizes_ref_RI(:)
+      INTEGER, ALLOCATABLE                               :: AO_offset(:), owner_rank(:), &
+                                                            RI_offset(:), sizes_ref_RI(:)
       LOGICAL                                            :: screened
       REAL(KIND=dp)                                      :: cluster_radius
       REAL(KIND=dp), ALLOCATABLE                         :: Int_3c_nonzero(:, :, :)
@@ -393,8 +395,9 @@ CONTAINS
          ikind = particle_set(iatom)%atomic_kind%kind_number
          sizes_ref_RI(iatom) = bs_env%basis_set_RI(ikind)%gto_basis_set%nsgf
       END DO
-      n_local_clusters = COUNT([(MOD(icenter_atom - 1, para_env%num_pe) == para_env%mepos, &
-                                 icenter_atom=1, bs_env%n_atom)])
+      ALLOCATE (owner_rank(bs_env%n_atom))
+      CALL assign_clusters_to_ranks(bs_env, sizes_ref_RI, owner_rank)
+      n_local_clusters = COUNT(owner_rank == para_env%mepos)
       ALLOCATE (cluster_3c_int(n_local_clusters), &
                 AO_offset(bs_env%n_atom), RI_offset(bs_env%n_atom))
       CALL gw_3c_ctx_create(integral_context, bs_env, bs_env%ri_metric, &
@@ -403,7 +406,7 @@ CONTAINS
       CALL gw_3c_ws_create(workspace, integral_context)
       ilocal_cluster = 0
       DO icenter_atom = 1, bs_env%n_atom
-         IF (MOD(icenter_atom - 1, para_env%num_pe) /= para_env%mepos) CYCLE
+         IF (owner_rank(icenter_atom) /= para_env%mepos) CYCLE
          ilocal_cluster = ilocal_cluster + 1
          CALL get_rirs_cluster_atoms(particle_set, cell, icenter_atom, cluster_radius, &
                                      cluster_3c_int(ilocal_cluster)%atom_indices)
@@ -524,6 +527,13 @@ CONTAINS
 !>
 !> The solve applies the same column Jacobi scaling and Tikhonov parameter as the production
 !> Z_lP construction. Z_prime_lP denotes the coefficients before undoing the Jacobi scaling.
+!>
+!> Let P_(mu,nu),l = sqrt(2-delta_mu,nu) Phi_l,mu Phi_l,nu for mu <= nu and G = Phi Phi^T.
+!> The weights restore the full double sum over mu,nu, hence P^T P = G o G (elementwise product).
+!> With q_l = SUM(P_l*P_l) and S_ll = 1/sqrt(max(q_l, jacobi_floor)), the Gram is S (G o G) S + lambda I.
+!> For H^a_l'l = sum_mu Phi_l',mu d_a Phi_l,mu, sum_p P_p,l' d_a P_p,l = 2 G_l'l H^a_l'l.
+!> This identity contracts the coefficient-response term in the residual gradient in grid space;
+!> the derivative of S is included above the Jacobi floor and vanishes below it.
 !> \param Phi_l_mu AO values ϕ_μ(r_l), indexed (l, μ).
 !> \param dPhi_alpha_l_mu Cartesian derivatives of ϕ_μ(r_l), indexed (α, l, μ).
 !> \param Int_3c Exact three-centre integrals, indexed (mu,nu,P).
@@ -547,19 +557,18 @@ CONTAINS
       CHARACTER(len=*), PARAMETER :: routineN = 'evaluate_rirs_grid_cluster'
       REAL(KIND=dp), PARAMETER                           :: jacobi_floor = 1.0E-16_dp
 
-      INTEGER                                            :: handle, i_ao_pair, icartesian, &
-                                                            igrid_point, imu, inu, ip, &
-                                                            lapack_info, n_AO_pairs, &
-                                                            n_grid_points, nAO, nRI, phase_handle
+      INTEGER :: handle, i_ao_pair, icartesian, igrid_point, imu, inu, ip, jgrid_point, &
+         lapack_info, n_AO_pairs, n_grid_points, nAO, nRI, phase_handle
       INTEGER, ALLOCATABLE                               :: mu_of_pair(:), nu_of_pair(:)
+      LOGICAL                                            :: use_lambda_gradient
       REAL(KIND=dp)                                      :: absolute_error, dPhi_munu_l, &
-                                                            Int_3c_norm2, jacobi_scale, &
-                                                            Phi_munu_norm2, scaling_projection, &
-                                                            symmetry_factor
-      REAL(KIND=dp), ALLOCATABLE :: D_inverse_Z_prime_lP(:, :), &
-         D_inverse_Z_prime_times_Z_prime_transpose_ll(:, :), D_ll(:, :), d_lP(:, :), &
-         dE_dPhi_munu_l(:, :), dPhi_munu_l_scaled(:), Int_3c_munu_P(:, :), jacobi_scaling(:), &
-         Phi_munu_l(:, :), Phi_munu_l_scaled(:, :), R_munu_P(:, :), Z_prime_lP(:, :)
+                                                            Int_3c_norm2, pair_sum, point_sum, &
+                                                            scaled_gram, symmetry_factor
+      REAL(KIND=dp), ALLOCATABLE :: D_inverse_Z_prime_lP(:, :), D_ll(:, :), d_lP(:, :), &
+         dPhi_l_mu(:, :), G_diagonal(:), G_ll(:, :), H_diagonal(:), H_ll(:, :), &
+         Int_3c_munu_P(:, :), jacobi_scaling(:), M_ll(:, :), norm2_l(:), Phi_munu_l(:, :), &
+         Phi_munu_l_scaled(:, :), projection_c(:), R_munu_P(:, :), sqrt_s(:), W_lP(:, :), &
+         X_munu_l(:, :), Z_prime_lP(:, :)
 
       CALL timeset(routineN, handle)
 
@@ -567,6 +576,7 @@ CONTAINS
       nAO = SIZE(Phi_l_mu, 2)
       nRI = SIZE(Int_3c, 3)
       n_AO_pairs = nAO*(nAO + 1)/2
+      use_lambda_gradient = tikhonov > 0.0_dp
 
       CPASSERT(SIZE(dPhi_alpha_l_mu, 1) == 3)
       CPASSERT(SIZE(dPhi_alpha_l_mu, 2) == n_grid_points)
@@ -588,12 +598,15 @@ CONTAINS
 
       ALLOCATE (Phi_munu_l(n_AO_pairs, n_grid_points), Phi_munu_l_scaled(n_AO_pairs, n_grid_points), &
                 Int_3c_munu_P(n_AO_pairs, nRI), mu_of_pair(n_AO_pairs), nu_of_pair(n_AO_pairs), &
-                jacobi_scaling(n_grid_points))
+                jacobi_scaling(n_grid_points), norm2_l(n_grid_points), sqrt_s(n_grid_points), &
+                G_diagonal(n_grid_points), H_diagonal(n_grid_points))
       CALL timeset("rirs_cluster_AO_products", phase_handle)
-      i_ao_pair = 0
+!$OMP PARALLEL DO DEFAULT(NONE) SCHEDULE(DYNAMIC) &
+!$OMP SHARED(nAO, nRI, n_grid_points, Phi_l_mu, Int_3c, Phi_munu_l, Int_3c_munu_P, mu_of_pair, nu_of_pair) &
+!$OMP PRIVATE(inu, imu, i_ao_pair, symmetry_factor, igrid_point, ip)
       DO inu = 1, nAO
          DO imu = 1, inu
-            i_ao_pair = i_ao_pair + 1
+            i_ao_pair = inu*(inu - 1)/2 + imu
             mu_of_pair(i_ao_pair) = imu
             nu_of_pair(i_ao_pair) = inu
             symmetry_factor = SQRT(REAL(2 - MERGE(1, 0, imu == inu), dp))
@@ -606,117 +619,205 @@ CONTAINS
             END DO
          END DO
       END DO
-
+!$OMP END PARALLEL DO
       Int_3c_norm2 = SUM(Int_3c_munu_P*Int_3c_munu_P)
       CALL timestop(phase_handle)
       IF (Int_3c_norm2 <= TINY(1.0_dp)) THEN
-         DEALLOCATE (Phi_munu_l, Phi_munu_l_scaled, Int_3c_munu_P, mu_of_pair, nu_of_pair, jacobi_scaling)
          CALL timestop(handle)
          RETURN
       END IF
 
-      ! D'_ll' = d_l D_ll' d_l' + λδ_ll', with d_l = 1/sqrt(D_ll).
-      DO igrid_point = 1, n_grid_points
-         Phi_munu_norm2 = SUM(Phi_munu_l(:, igrid_point)*Phi_munu_l(:, igrid_point))
-         jacobi_scaling(igrid_point) = 1.0_dp/SQRT(MAX(Phi_munu_norm2, jacobi_floor))
-         Phi_munu_l_scaled(:, igrid_point) = &
-            jacobi_scaling(igrid_point)*Phi_munu_l(:, igrid_point)
-      END DO
-      ALLOCATE (D_ll(n_grid_points, n_grid_points), d_lP(n_grid_points, nRI), Z_prime_lP(n_grid_points, nRI))
+      ! G_ll' = sum_mu phi_mu(l) phi_mu(l'); the AO-pair Gram matrix is G o G, and ||P_l||^2 = G_ll^2.
       CALL timeset("rirs_cluster_D_ll", phase_handle)
-      CALL dgemm('T', 'N', n_grid_points, n_grid_points, n_AO_pairs, 1.0_dp, Phi_munu_l_scaled, n_AO_pairs, &
-                 Phi_munu_l_scaled, n_AO_pairs, 0.0_dp, D_ll, n_grid_points)
-      CALL timestop(phase_handle)
+      ALLOCATE (D_ll(n_grid_points, n_grid_points))
+      IF (use_lambda_gradient) THEN
+         ALLOCATE (G_ll(n_grid_points, n_grid_points))
+         CALL dgemm('N', 'T', n_grid_points, n_grid_points, nAO, 1.0_dp, Phi_l_mu, n_grid_points, &
+                    Phi_l_mu, n_grid_points, 0.0_dp, G_ll, n_grid_points)
+         DO igrid_point = 1, n_grid_points
+            G_diagonal(igrid_point) = G_ll(igrid_point, igrid_point)
+         END DO
+      ELSE
+         ! Without a response term, reuse D for the AO Gram before scaling and factorization.
+         CALL dgemm('N', 'T', n_grid_points, n_grid_points, nAO, 1.0_dp, Phi_l_mu, n_grid_points, &
+                    Phi_l_mu, n_grid_points, 0.0_dp, D_ll, n_grid_points)
+         DO igrid_point = 1, n_grid_points
+            G_diagonal(igrid_point) = D_ll(igrid_point, igrid_point)
+         END DO
+      END IF
+      ! Distribute points only; each point uses the unchanged AO-pair SUM expression.
+!$OMP PARALLEL DO DEFAULT(NONE) SHARED(n_grid_points, Phi_munu_l, norm2_l, jacobi_scaling, sqrt_s) &
+!$OMP PRIVATE(igrid_point)
       DO igrid_point = 1, n_grid_points
-         D_ll(igrid_point, igrid_point) = D_ll(igrid_point, igrid_point) + tikhonov
+         ! Retain the explicit pair reduction: rounding can change the branch at the Jacobi floor.
+         norm2_l(igrid_point) = SUM(Phi_munu_l(:, igrid_point)*Phi_munu_l(:, igrid_point))
+         jacobi_scaling(igrid_point) = 1.0_dp/SQRT(MAX(norm2_l(igrid_point), jacobi_floor))
+         sqrt_s(igrid_point) = SQRT(jacobi_scaling(igrid_point))
       END DO
+!$OMP END PARALLEL DO
+      ! Scale before squaring to retain representable entries when G**2 would underflow or overflow.
+!$OMP PARALLEL DO DEFAULT(NONE) SHARED(n_grid_points, G_ll, D_ll, sqrt_s, tikhonov, use_lambda_gradient) &
+!$OMP PRIVATE(igrid_point, jgrid_point, scaled_gram)
+      DO jgrid_point = 1, n_grid_points
+         DO igrid_point = 1, n_grid_points
+            IF (use_lambda_gradient) THEN
+               scaled_gram = sqrt_s(igrid_point)*G_ll(igrid_point, jgrid_point)*sqrt_s(jgrid_point)
+            ELSE
+               scaled_gram = sqrt_s(igrid_point)*D_ll(igrid_point, jgrid_point)*sqrt_s(jgrid_point)
+            END IF
+            D_ll(igrid_point, jgrid_point) = scaled_gram**2
+         END DO
+         D_ll(jgrid_point, jgrid_point) = D_ll(jgrid_point, jgrid_point) + tikhonov
+      END DO
+!$OMP END PARALLEL DO
+      CALL timestop(phase_handle)
+!$OMP PARALLEL DO DEFAULT(NONE) SHARED(n_grid_points, Phi_munu_l, Phi_munu_l_scaled, jacobi_scaling) &
+!$OMP PRIVATE(igrid_point)
+      DO igrid_point = 1, n_grid_points
+         Phi_munu_l_scaled(:, igrid_point) = jacobi_scaling(igrid_point)*Phi_munu_l(:, igrid_point)
+      END DO
+!$OMP END PARALLEL DO
+
+      ALLOCATE (d_lP(n_grid_points, nRI), Z_prime_lP(n_grid_points, nRI))
       CALL timeset("rirs_cluster_d_lP", phase_handle)
       CALL dgemm('T', 'N', n_grid_points, nRI, n_AO_pairs, 1.0_dp, Phi_munu_l_scaled, n_AO_pairs, &
                  Int_3c_munu_P, n_AO_pairs, 0.0_dp, d_lP, n_grid_points)
       CALL timestop(phase_handle)
       CALL dpotrf('L', n_grid_points, D_ll, n_grid_points, lapack_info)
       IF (lapack_info /= 0) THEN
-         DEALLOCATE (Phi_munu_l, Phi_munu_l_scaled, Int_3c_munu_P, D_ll, mu_of_pair, nu_of_pair, d_lP, &
-                     jacobi_scaling, Z_prime_lP)
          CALL timestop(handle)
          RETURN
       END IF
       Z_prime_lP(:, :) = d_lP
-      CALL dpotrs('L', n_grid_points, nRI, D_ll, n_grid_points, Z_prime_lP, n_grid_points, lapack_info)
       DEALLOCATE (d_lP)
+      CALL dpotrs('L', n_grid_points, nRI, D_ll, n_grid_points, Z_prime_lP, n_grid_points, lapack_info)
       IF (lapack_info /= 0) THEN
-         DEALLOCATE (Phi_munu_l, Phi_munu_l_scaled, Int_3c_munu_P, D_ll, mu_of_pair, nu_of_pair, &
-                     jacobi_scaling, Z_prime_lP)
          CALL timestop(handle)
          RETURN
       END IF
+
+      IF (.NOT. use_lambda_gradient) DEALLOCATE (D_ll)
 
       CALL timeset("rirs_cluster_residual", phase_handle)
       ALLOCATE (R_munu_P(n_AO_pairs, nRI))
       R_munu_P(:, :) = Int_3c_munu_P
-      ! R_μνP = (μν|P) - Σ_l ϕ_μ(r_l) ϕ_ν(r_l) d_l Z'_lP.
       CALL dgemm('N', 'N', n_AO_pairs, nRI, n_grid_points, -1.0_dp, Phi_munu_l_scaled, n_AO_pairs, &
                  Z_prime_lP, n_grid_points, 1.0_dp, R_munu_P, n_AO_pairs)
+      DEALLOCATE (Phi_munu_l_scaled, Int_3c_munu_P)
       normalized_error = SUM(R_munu_P*R_munu_P)/Int_3c_norm2
       CALL timestop(phase_handle)
 
-      ! For λ>0, the residual derivative includes the response of the regularized coefficients:
-      ! dE/dϕ = [-2 R Z^T - 2λ(R Y^T - ϕ Y Z^T)] / ||Int_3c||^2.
-      ALLOCATE (D_inverse_Z_prime_lP(n_grid_points, nRI), dE_dPhi_munu_l(n_AO_pairs, n_grid_points))
-      D_inverse_Z_prime_lP(:, :) = Z_prime_lP
-      CALL dpotrs('L', n_grid_points, nRI, D_ll, n_grid_points, D_inverse_Z_prime_lP, n_grid_points, lapack_info)
-      IF (lapack_info /= 0) THEN
-         DEALLOCATE (Phi_munu_l, Phi_munu_l_scaled, Int_3c_munu_P, dE_dPhi_munu_l, D_ll, mu_of_pair, nu_of_pair, &
-                     R_munu_P, jacobi_scaling, D_inverse_Z_prime_lP, Z_prime_lP)
-         CALL timestop(handle)
-         RETURN
+      ! For B = P S, dE/dB = X + B M, where X = -2 R (Z' + lambda Y)^T/N,
+      ! Y = D'^(-1) Z' and M = 2 lambda Y Z'^T/N. Contract B M without forming it.
+      ALLOCATE (W_lP(n_grid_points, nRI))
+      W_lP(:, :) = Z_prime_lP
+      IF (use_lambda_gradient) THEN
+         ALLOCATE (D_inverse_Z_prime_lP(n_grid_points, nRI))
+         D_inverse_Z_prime_lP(:, :) = Z_prime_lP
+         CALL dpotrs('L', n_grid_points, nRI, D_ll, n_grid_points, D_inverse_Z_prime_lP, n_grid_points, lapack_info)
+         IF (lapack_info /= 0) THEN
+            CALL timestop(handle)
+            RETURN
+         END IF
+         DEALLOCATE (D_ll)
       END IF
       CALL timeset("rirs_cluster_gradient_products", phase_handle)
-      CALL dgemm('N', 'T', n_AO_pairs, n_grid_points, nRI, -2.0_dp/Int_3c_norm2, R_munu_P, n_AO_pairs, &
-                 Z_prime_lP, n_grid_points, 0.0_dp, dE_dPhi_munu_l, n_AO_pairs)
-      IF (tikhonov > 0.0_dp) THEN
-         CALL dgemm('N', 'T', n_AO_pairs, n_grid_points, nRI, -2.0_dp*tikhonov/Int_3c_norm2, R_munu_P, n_AO_pairs, &
-                    D_inverse_Z_prime_lP, n_grid_points, 1.0_dp, dE_dPhi_munu_l, n_AO_pairs)
-         ALLOCATE (D_inverse_Z_prime_times_Z_prime_transpose_ll(n_grid_points, n_grid_points))
-         CALL dgemm('N', 'T', n_grid_points, n_grid_points, nRI, 1.0_dp, D_inverse_Z_prime_lP, n_grid_points, &
-                    Z_prime_lP, n_grid_points, 0.0_dp, D_inverse_Z_prime_times_Z_prime_transpose_ll, n_grid_points)
-         CALL dgemm('N', 'N', n_AO_pairs, n_grid_points, n_grid_points, &
-                    2.0_dp*tikhonov/Int_3c_norm2, Phi_munu_l_scaled, n_AO_pairs, &
-                    D_inverse_Z_prime_times_Z_prime_transpose_ll, n_grid_points, 1.0_dp, dE_dPhi_munu_l, n_AO_pairs)
-         DEALLOCATE (D_inverse_Z_prime_times_Z_prime_transpose_ll)
+      IF (use_lambda_gradient) THEN
+         ALLOCATE (M_ll(n_grid_points, n_grid_points))
+         W_lP(:, :) = W_lP + tikhonov*D_inverse_Z_prime_lP
+         CALL dgemm('N', 'T', n_grid_points, n_grid_points, nRI, 2.0_dp*tikhonov/Int_3c_norm2, &
+                    D_inverse_Z_prime_lP, n_grid_points, Z_prime_lP, n_grid_points, 0.0_dp, M_ll, n_grid_points)
+         DEALLOCATE (D_inverse_Z_prime_lP)
       END IF
-
+      DEALLOCATE (Z_prime_lP)
+      ALLOCATE (X_munu_l(n_AO_pairs, n_grid_points))
+      CALL dgemm('N', 'T', n_AO_pairs, n_grid_points, nRI, -2.0_dp/Int_3c_norm2, R_munu_P, n_AO_pairs, &
+                 W_lP, n_grid_points, 0.0_dp, X_munu_l, n_AO_pairs)
+      DEALLOCATE (W_lP)
       CALL timestop(phase_handle)
+
+      ! grad(a,l) = s_l (a1 + a2) - s_l^3 b c   (projection only if ||P_l||^2 > floor), with
+      ! a1 = sum_p X_pl dP_pl,  a2 = sum_l' M_l'l s_l' 2 G_l'l H_l'l,  b = P_l.dP_l = 2 G_ll H_ll,
+      ! c = sum_p X_pl P_pl + sum_l' M_l'l s_l' G_l'l^2.
       CALL timeset("rirs_cluster_gradient_coordinates", phase_handle)
-      ALLOCATE (dPhi_munu_l_scaled(n_AO_pairs))
+      ALLOCATE (projection_c(n_grid_points), dPhi_l_mu(n_grid_points, nAO))
+!$OMP PARALLEL DO DEFAULT(NONE) &
+!$OMP SHARED(n_grid_points, X_munu_l, Phi_munu_l, M_ll, jacobi_scaling, sqrt_s, G_ll, projection_c) &
+!$OMP SHARED(use_lambda_gradient) &
+!$OMP PRIVATE(igrid_point, jgrid_point, point_sum, scaled_gram)
       DO igrid_point = 1, n_grid_points
-         jacobi_scale = jacobi_scaling(igrid_point)
-         Phi_munu_norm2 = SUM(Phi_munu_l(:, igrid_point)*Phi_munu_l(:, igrid_point))
-         DO icartesian = 1, 3
+         point_sum = 0.0_dp
+         IF (use_lambda_gradient) THEN
+            DO jgrid_point = 1, n_grid_points
+               ! Apply scaling before the square, and before multiplying by the response coefficient.
+               scaled_gram = sqrt_s(jgrid_point)*G_ll(jgrid_point, igrid_point)
+               point_sum = point_sum + M_ll(jgrid_point, igrid_point)*scaled_gram**2
+               ! Reuse G for K_jl = M_jl s_j G_jl once its contribution to c has been consumed.
+               G_ll(jgrid_point, igrid_point) = M_ll(jgrid_point, igrid_point)* &
+                                                (jacobi_scaling(jgrid_point)*G_ll(jgrid_point, igrid_point))
+            END DO
+         END IF
+         projection_c(igrid_point) = DOT_PRODUCT(X_munu_l(:, igrid_point), Phi_munu_l(:, igrid_point)) + &
+                                     point_sum
+      END DO
+!$OMP END PARALLEL DO
+      DEALLOCATE (Phi_munu_l, sqrt_s)
+      IF (use_lambda_gradient) THEN
+         DEALLOCATE (M_ll)
+         ALLOCATE (H_ll(n_grid_points, n_grid_points))
+      END IF
+      DO icartesian = 1, 3
+         dPhi_l_mu(:, :) = dPhi_alpha_l_mu(icartesian, :, :)
+         ! At lambda = 0 only H_ll is needed; do not allocate or form the full H matrix.
+         IF (use_lambda_gradient) THEN
+            CALL dgemm('N', 'T', n_grid_points, n_grid_points, nAO, 1.0_dp, Phi_l_mu, n_grid_points, &
+                       dPhi_l_mu, n_grid_points, 0.0_dp, H_ll, n_grid_points)
+            DO igrid_point = 1, n_grid_points
+               H_diagonal(igrid_point) = H_ll(igrid_point, igrid_point)
+            END DO
+         ELSE
+            DO igrid_point = 1, n_grid_points
+               H_diagonal(igrid_point) = DOT_PRODUCT(Phi_l_mu(igrid_point, :), dPhi_l_mu(igrid_point, :))
+            END DO
+         END IF
+!$OMP PARALLEL DO DEFAULT(NONE) SCHEDULE(DYNAMIC) &
+!$OMP SHARED(n_grid_points, n_AO_pairs, icartesian, mu_of_pair, nu_of_pair, Phi_l_mu, dPhi_l_mu) &
+!$OMP SHARED(X_munu_l, jacobi_scaling, G_ll, H_ll, norm2_l, projection_c, coordinate_gradient) &
+!$OMP SHARED(use_lambda_gradient, G_diagonal, H_diagonal) &
+!$OMP PRIVATE(igrid_point, jgrid_point, i_ao_pair, imu, inu, symmetry_factor, dPhi_munu_l, pair_sum, point_sum)
+         DO igrid_point = 1, n_grid_points
+            pair_sum = 0.0_dp
             DO i_ao_pair = 1, n_AO_pairs
                imu = mu_of_pair(i_ao_pair)
                inu = nu_of_pair(i_ao_pair)
                symmetry_factor = SQRT(REAL(2 - MERGE(1, 0, imu == inu), dp))
-               dPhi_munu_l = symmetry_factor*( &
-                             dPhi_alpha_l_mu(icartesian, igrid_point, imu)* &
-                             Phi_l_mu(igrid_point, inu) + &
-                             Phi_l_mu(igrid_point, imu)* &
-                             dPhi_alpha_l_mu(icartesian, igrid_point, inu))
-               dPhi_munu_l_scaled(i_ao_pair) = jacobi_scale*dPhi_munu_l
+               dPhi_munu_l = symmetry_factor*(dPhi_l_mu(igrid_point, imu)*Phi_l_mu(igrid_point, inu) + &
+                                              Phi_l_mu(igrid_point, imu)*dPhi_l_mu(igrid_point, inu))
+               pair_sum = pair_sum + X_munu_l(i_ao_pair, igrid_point)*dPhi_munu_l
             END DO
-            IF (Phi_munu_norm2 > jacobi_floor) THEN
-               scaling_projection = &
-                  DOT_PRODUCT(Phi_munu_l(:, igrid_point), dPhi_munu_l_scaled)/jacobi_scale
-               dPhi_munu_l_scaled(:) = dPhi_munu_l_scaled - &
-                                       jacobi_scale**3*Phi_munu_l(:, igrid_point)*scaling_projection
+            point_sum = 0.0_dp
+            IF (use_lambda_gradient) THEN
+               DO jgrid_point = 1, n_grid_points
+                  point_sum = point_sum + G_ll(jgrid_point, igrid_point)* &
+                              (jacobi_scaling(igrid_point)*H_ll(jgrid_point, igrid_point))
+               END DO
             END IF
-            coordinate_gradient(icartesian, igrid_point) = &
-               DOT_PRODUCT(dE_dPhi_munu_l(:, igrid_point), dPhi_munu_l_scaled)
+            coordinate_gradient(icartesian, igrid_point) = jacobi_scaling(igrid_point)*pair_sum + 2.0_dp*point_sum
+            ! Pair scaling with G, H and c instead of forming s**3 before the contractions.
+            IF (norm2_l(igrid_point) > jacobi_floor) THEN
+               coordinate_gradient(icartesian, igrid_point) = coordinate_gradient(icartesian, igrid_point) - &
+                                                              2.0_dp*(jacobi_scaling(igrid_point)*G_diagonal(igrid_point))* &
+                                                              (jacobi_scaling(igrid_point)*H_diagonal(igrid_point))* &
+                                                              (jacobi_scaling(igrid_point)*projection_c(igrid_point))
+            END IF
          END DO
+!$OMP END PARALLEL DO
       END DO
-
       CALL timestop(phase_handle)
+
       max_abs_error = 0.0_dp
+!$OMP PARALLEL DO DEFAULT(NONE) SHARED(nRI, n_AO_pairs, mu_of_pair, nu_of_pair, R_munu_P) &
+!$OMP PRIVATE(ip, i_ao_pair, symmetry_factor, absolute_error) REDUCTION(MAX:max_abs_error)
       DO ip = 1, nRI
          DO i_ao_pair = 1, n_AO_pairs
             symmetry_factor = &
@@ -725,12 +826,102 @@ CONTAINS
             max_abs_error = MAX(max_abs_error, absolute_error)
          END DO
       END DO
+!$OMP END PARALLEL DO
 
       fit_successful = .TRUE.
-      DEALLOCATE (Phi_munu_l, Phi_munu_l_scaled, Int_3c_munu_P, dE_dPhi_munu_l, dPhi_munu_l_scaled, D_ll, &
-                  mu_of_pair, nu_of_pair, R_munu_P, jacobi_scaling, D_inverse_Z_prime_lP, Z_prime_lP)
       CALL timestop(handle)
    END SUBROUTINE evaluate_rirs_grid_cluster
+
+! **************************************************************************************************
+!> \brief Estimate the v2 single-rank-group cost of every cluster.
+!> \param npts Grid points in each cluster.
+!> \param nao AO functions in each cluster.
+!> \param nri Auxiliary functions in each cluster.
+!> \param cost Estimated cost of each cluster.
+! **************************************************************************************************
+   SUBROUTINE cluster_cost(npts, nao, nri, cost)
+      INTEGER, DIMENSION(:), INTENT(IN)                  :: npts, nao, nri
+      REAL(KIND=dp), DIMENSION(:), INTENT(OUT)           :: cost
+
+      INTEGER                                            :: i
+      REAL(KIND=dp)                                      :: a, n, p, r, redundant_work, split_work
+
+      CPASSERT(SIZE(npts) == SIZE(nao) .AND. SIZE(npts) == SIZE(nri))
+      CPASSERT(SIZE(npts) == SIZE(cost))
+      DO i = 1, SIZE(npts)
+         a = REAL(nao(i), dp)
+         n = REAL(npts(i), dp)
+         r = REAL(nri(i), dp)
+         p = a*(a + 1.0_dp)/2.0_dp
+         split_work = p*n*(6.0_dp*r + 20.0_dp) + 4.0_dp*n*n*r
+         redundant_work = n**3/3.0_dp + 8.0_dp*n*n*a + 2.0_dp*n*n*r + 5.0_dp*p*n
+         cost(i) = split_work + redundant_work
+      END DO
+   END SUBROUTINE cluster_cost
+
+! **************************************************************************************************
+!> \brief Assign whole clusters to ranks by longest-processing-time scheduling.
+!>        Ties use the lowest cluster index, then the lowest rank.
+!> \param cost Estimated cost of each cluster.
+!> \param num_pe Number of MPI ranks.
+!> \param owner_rank Zero-based owner rank of every cluster.
+! **************************************************************************************************
+   SUBROUTINE schedule_clusters(cost, num_pe, owner_rank)
+      REAL(KIND=dp), DIMENSION(:), INTENT(IN)            :: cost
+      INTEGER, INTENT(IN)                                :: num_pe
+      INTEGER, DIMENSION(:), INTENT(OUT)                 :: owner_rank
+
+      INTEGER                                            :: best_rank, i, ipick, ncluster
+      LOGICAL, ALLOCATABLE                               :: done(:)
+      REAL(KIND=dp), ALLOCATABLE                         :: rank_load(:)
+
+      CPASSERT(num_pe > 0)
+      ncluster = SIZE(cost)
+      CPASSERT(SIZE(owner_rank) == ncluster)
+      ALLOCATE (done(ncluster), rank_load(num_pe))
+      done = .FALSE.
+      rank_load = 0.0_dp
+      DO i = 1, ncluster
+         ipick = MAXLOC(cost, DIM=1, MASK=.NOT. done)
+         done(ipick) = .TRUE.
+         best_rank = MINLOC(rank_load, DIM=1)
+         owner_rank(ipick) = best_rank - 1
+         rank_load(best_rank) = rank_load(best_rank) + cost(ipick)
+      END DO
+   END SUBROUTINE schedule_clusters
+
+! **************************************************************************************************
+!> \brief Derive cluster sizes and assign every whole cluster to one MPI rank.
+!> \param bs_env Bandstructure state with initialized grids.
+!> \param sizes_ref_RI Auxiliary basis sizes before zero-column screening.
+!> \param owner_rank Zero-based owner rank of every cluster.
+! **************************************************************************************************
+   SUBROUTINE assign_clusters_to_ranks(bs_env, sizes_ref_RI, owner_rank)
+      TYPE(post_scf_bandstructure_type), INTENT(IN), &
+         POINTER                                         :: bs_env
+      INTEGER, DIMENSION(:), INTENT(IN)                  :: sizes_ref_RI
+      INTEGER, DIMENSION(:), INTENT(OUT)                 :: owner_rank
+
+      INTEGER                                            :: iatom, icenter, j
+      INTEGER, ALLOCATABLE                               :: atom_indices(:), nao(:), npts(:), nri(:)
+      REAL(KIND=dp), ALLOCATABLE                         :: cost(:)
+
+      ALLOCATE (nao(bs_env%n_atom), npts(bs_env%n_atom), nri(bs_env%n_atom), cost(bs_env%n_atom))
+      DO icenter = 1, bs_env%n_atom
+         CALL get_rirs_cluster_atoms(bs_env%ri_rs%particle_set, bs_env%ri_rs%cell, icenter, &
+                                     bs_env%ri_rs%grid_opt%cutoff_atomic_cluster, atom_indices)
+         nao(icenter) = SUM(bs_env%sizes_AO(atom_indices))
+         nri(icenter) = SUM(sizes_ref_RI(atom_indices))
+         npts(icenter) = 0
+         DO j = 1, SIZE(atom_indices)
+            iatom = atom_indices(j)
+            npts(icenter) = npts(icenter) + SIZE(bs_env%ri_rs%atomic_grids(iatom)%raw_points, 2)
+         END DO
+         DEALLOCATE (atom_indices)
+      END DO
+      CALL cluster_cost(npts, nao, nri, cost)
+      CALL schedule_clusters(cost, bs_env%para_env%num_pe, owner_rank)
+   END SUBROUTINE assign_clusters_to_ranks
 
 ! **************************************************************************************************
 !> \brief Sum gradient contributions from overlapping C_A into each atom-centred grid coordinate.
