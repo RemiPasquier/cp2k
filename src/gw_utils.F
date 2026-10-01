@@ -360,7 +360,9 @@ CONTAINS
       CALL section_vals_val_get(grid_opt_sec, "CUTOFF_ATOMIC_CLUSTER", r_val=grid_opt%cutoff_atomic_cluster)
       CALL section_vals_val_get(grid_opt_sec, "MAX_ITER", i_val=grid_opt%max_iter)
       CALL section_vals_val_get(grid_opt_sec, "RS_AO_RATIO", r_val=grid_opt%rs_ao_ratio)
-      IF (grid_opt%rs_ao_ratio <= 0.0_dp) CPABORT("RS_AO_RATIO must be positive")
+      IF (grid_opt%rs_ao_ratio <= 0.0_dp) THEN
+         CPABORT("RS_AO_RATIO must be positive")
+      END IF
       CALL timestop(handle)
 
    END SUBROUTINE read_rirs_grid_opt
@@ -414,11 +416,15 @@ CONTAINS
       CALL section_vals_val_get(auto_ri_sec, "RI_AO_RATIO", r_val=auto_ri%ri_ao_ratio)
       CALL section_vals_val_get(auto_ri_sec, "OCC_EMPTY_FRONTIER_ORBITAL_WINDOW", r_val=auto_ri%occ_energy_window)
       CALL section_vals_val_get(auto_ri_sec, "NEIGHBOR_RADIUS", r_val=auto_ri%neighbor_radius)
-      IF (.NOT. (auto_ri%ri_ao_ratio > 0.0_dp)) CPABORT("AUTO_RI%RI_AO_RATIO must be positive")
+      IF (.NOT. (auto_ri%ri_ao_ratio > 0.0_dp)) THEN
+         CPABORT("AUTO_RI%RI_AO_RATIO must be positive")
+      END IF
       IF (.NOT. (auto_ri%occ_energy_window >= 0.0_dp)) THEN
          CPABORT("AUTO_RI%OCC_EMPTY_FRONTIER_ORBITAL_WINDOW must be nonnegative")
       END IF
-      IF (.NOT. (auto_ri%neighbor_radius > 0.0_dp)) CPABORT("AUTO_RI%NEIGHBOR_RADIUS must be positive")
+      IF (.NOT. (auto_ri%neighbor_radius > 0.0_dp)) THEN
+         CPABORT("AUTO_RI%NEIGHBOR_RADIUS must be positive")
+      END IF
 
       CALL timestop(handle)
 
@@ -1587,7 +1593,9 @@ CONTAINS
 
       END DO
 
-      IF (group_size_orig == group_size) CPABORT("Group size error")
+      IF (group_size_orig == group_size) THEN
+         CPABORT("Group size error")
+      END IF
 
       CALL timestop(handle)
 
