@@ -138,7 +138,8 @@ CONTAINS
          DO j = 1, n_ao_used
             d_vec_local(i) = d_vec_local(i) + phi_local(i, j)*phi_local(i, j)
          END DO
-         d_vec_local(i) = 1.0_dp/MAX(d_vec_local(i), jacobi_floor)
+         ! Same floor as build_gram_jacobi_blas, where the scale is 1/SQRT(MAX(n_l**4, jacobi_floor)).
+         d_vec_local(i) = 1.0_dp/MAX(d_vec_local(i), SQRT(jacobi_floor))
       END DO
       !$OMP END PARALLEL DO
 
