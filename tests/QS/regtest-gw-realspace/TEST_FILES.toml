@@ -41,4 +41,54 @@
                                           {matcher="RIRS_Grid_Optimization_Error", tol=1e-1, ref=8.4e-4}]
 # Candidate generation exceeds its default ratio; rank saturation is completed by maximin.
 "rirs-grid-rank-saturation-maximin-H2O.inp" = [{matcher="RIRS_Grid", tol=1e-12, ref=280}]
+# The insertion order is significant: do_regtest.py runs a directory's entries sequentially in one workdir.
+"rirs-grid-auto-1-write-H2O.inp" = [{matcher="RIRS_Grid_Restart_Written", tol=1e-12, ref=24},
+                                    {matcher="RIRS_Grid", tol=1e-12, ref=24},
+                                    {matcher="RIRS_Grid_Optimization_Error", tol=1e-1, ref=6.3e-4},
+                                    {matcher="E_RIRS_HOMO", tol=1e-3, ref=-6.096},
+                                    {matcher="E_RIRS_LUMO", tol=1e-3, ref=17.684},
+                                    {matcher="E_G0W0_direct_gap", tol=1e-3, ref=23.780}]
+# Same project and geometry: the restart is exact, optimization is skipped, and energies use the writer's references.
+"rirs-grid-auto-2-reuse-H2O.inp" = [{matcher="RIRS_Grid_Restart_Reused", tol=1e-12, ref=24},
+                                     {matcher="NO_TEXT", text="RI-RS grid optimization completed,"},
+                                     {matcher="NO_TEXT", text="WARNING: RI-RS grid restart not used:"},
+                                    {matcher="RIRS_Grid", tol=1e-12, ref=24},
+                                    {matcher="E_RIRS_HOMO", tol=1e-3, ref=-6.096},
+                                    {matcher="E_RIRS_LUMO", tol=1e-3, ref=17.684},
+                                    {matcher="E_G0W0_direct_gap", tol=1e-3, ref=23.780}]
+# Fresh project with baseline metadata (MAX_ITER 5); MAX_ITER 6 requires cold optimization.
+"rirs-grid-auto-2b-maxiter-H2O.inp" = [{matcher="RIRS_Grid_Restart_Not_Used_Max_Iter"},
+                                        {matcher="RIRS_Grid_Optimization_Completed"},
+                                       {matcher="RIRS_Grid", tol=1e-12, ref=24}]
+# Fresh project with baseline metadata (MAX_ITER 5); MAX_ITER 4 (a decrease) also requires cold optimization.
+"rirs-grid-auto-2c-maxiter-decrease-H2O.inp" = [{matcher="RIRS_Grid_Restart_Not_Used_Max_Iter"},
+                                                 {matcher="RIRS_Grid_Optimization_Completed"},
+                                                 {matcher="NO_TEXT", text="RI-RS grid reused without optimization:"},
+                                                 {matcher="RIRS_Grid", tol=1e-12, ref=24}]
+# Fresh project with baseline metadata; one H moved by 0.005 angstrom requires cold optimization.
+# Cold moved-geometry references were regenerated and confirmed at c7cf985baf.
+"rirs-grid-auto-3-moved-H2O.inp" = [{matcher="RIRS_Grid_Restart_Not_Used_Positions"},
+                                     {matcher="RIRS_Grid_Optimization_Completed"},
+                                   {matcher="RIRS_Grid", tol=1e-12, ref=24},
+                                   {matcher="RIRS_Grid_Optimization_Error", tol=1e-1, ref=6.3e-4},
+                                   {matcher="E_RIRS_HOMO", tol=1e-3, ref=-6.080},
+                                   {matcher="E_RIRS_LUMO", tol=1e-3, ref=17.620},
+                                   {matcher="E_G0W0_direct_gap", tol=1e-3, ref=23.700}]
+# A pre-seeded v1 file declares the wrong atom count; it is not used and the cold path completes.
+"rirs-grid-auto-4-ignore-H2O.inp" = [{matcher="RIRS_Grid_Restart_Not_Used"},
+                                      {matcher="RIRS_Grid_Restart_Not_Used_Identity"},
+                                     {matcher="RIRS_Grid", tol=1e-12, ref=24},
+                                     {matcher="RIRS_Grid_Optimization_Error", tol=1e-1, ref=6.3e-4},
+                                     {matcher="E_RIRS_HOMO", tol=1e-3, ref=-6.096},
+                                     {matcher="E_RIRS_LUMO", tol=1e-3, ref=17.684},
+                                     {matcher="E_G0W0_direct_gap", tol=1e-3, ref=23.780}]
+# Valid baseline header/identity with a null second point record; warn and complete a cold calculation.
+"rirs-grid-auto-5-corrupt-H2O.inp" = [{matcher="RIRS_Grid_Restart_Corrupt"},
+                                       {matcher="RIRS_Grid_Optimization_Completed"},
+                                       {matcher="NO_TEXT", text="RI-RS grid reused without optimization:"},
+                                       {matcher="RIRS_Grid", tol=1e-12, ref=24},
+                                       {matcher="RIRS_Grid_Optimization_Error", tol=1e-1, ref=6.3e-4},
+                                       {matcher="E_RIRS_HOMO", tol=1e-3, ref=-6.096},
+                                       {matcher="E_RIRS_LUMO", tol=1e-3, ref=17.684},
+                                       {matcher="E_G0W0_direct_gap", tol=1e-3, ref=23.780}]
 #EOF

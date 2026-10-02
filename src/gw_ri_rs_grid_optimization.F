@@ -15,6 +15,7 @@ MODULE gw_ri_rs_grid_optimization
    USE cell_types,                      ONLY: cell_type
    USE cp_lbfgs,                        ONLY: setulb
    USE gw_ri_rs_grid_initialization,    ONLY: initialize_ri_rs_grid
+   USE gw_ri_rs_grid_restart,           ONLY: read_ri_rs_grid_restart
    USE gw_ri_rs_utils,                  ONLY: evaluate_ao_basis_on_points,&
                                               filter_grid_to_voronoi,&
                                               get_rirs_cluster_atoms
@@ -58,6 +59,7 @@ CONTAINS
       CHARACTER(len=*), PARAMETER :: routineN = 'optimize_ri_rs_grid'
 
       INTEGER                                            :: handle
+      LOGICAL                                            :: exact_reuse
       TYPE(local_cluster_3c_integrals_type), ALLOCATABLE :: cluster_3c_int(:)
 
       CALL timeset(routineN, handle)
@@ -67,6 +69,14 @@ CONTAINS
 
       ! setup Lebedev initial grid inside Voronoi volume, select points with Cholesky decomp.
       CALL initialize_ri_rs_grid(bs_env)
+
+      IF (bs_env%ri_rs%grid_restart_exists) THEN
+         CALL read_ri_rs_grid_restart(bs_env, exact_reuse)
+         IF (exact_reuse) THEN
+            CALL timestop(handle)
+            RETURN
+         END IF
+      END IF
 
       ! Validate the initialized RI-RS state and report the start of the optimization.
       CALL prepare_ri_rs_grid_optimization(bs_env)
