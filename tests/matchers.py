@@ -481,6 +481,30 @@ registry["RIRS_CUTOFF"] = GenericMatcher(
 registry["RIRS_Grid_Optimization_Error"] = GenericMatcher(
     r"Normalized 3C error:", col=4
 )
+registry["RIRS_Grid_Restart_Written"] = GenericMatcher(
+    r"RI-RS grid restart written:", col=5
+)
+registry["RIRS_Grid_Restart_Reused"] = GenericMatcher(
+    r"RI-RS grid reused without optimization:", col=6
+)
+registry["RIRS_Grid_Restart_Not_Used"] = TextPresenceMatcher(
+    "WARNING: RI-RS grid restart not used: "
+)
+registry["RIRS_Grid_Restart_Not_Used_Max_Iter"] = TextPresenceMatcher(
+    "WARNING: RI-RS grid restart not used: MAX_ITER differ"
+)
+registry["RIRS_Grid_Restart_Not_Used_Positions"] = TextPresenceMatcher(
+    "WARNING: RI-RS grid restart not used: positions differ"
+)
+registry["RIRS_Grid_Restart_Not_Used_Identity"] = TextPresenceMatcher(
+    "WARNING: RI-RS grid restart not used: atom count differs"
+)
+registry["RIRS_Grid_Restart_Corrupt"] = TextPresenceMatcher(
+    "WARNING: RI-RS grid restart not used: corrupt point record for atom 1"
+)
+registry["RIRS_Grid_Optimization_Completed"] = TextPresenceMatcher(
+    "RI-RS grid optimization completed, execution time:"
+)
 registry["E_RIRS_HOMO"] = GenericMatcher(r"G0W0 valence band maximum", col=6)
 registry["E_RIRS_LUMO"] = GenericMatcher(r"G0W0 conduction band minimum", col=6)
 

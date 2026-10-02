@@ -115,6 +115,8 @@ MODULE post_scf_bandstructure_types
       TYPE(dbcsr_type)                                 :: mat_Z_lP
       REAL(KIND=dp), ALLOCATABLE                       :: grid_points(:, :)
       LOGICAL                                          :: Z_lP_exists = .FALSE.
+      LOGICAL                                          :: grid_restart_exists = .FALSE.
+      LOGICAL                                          :: grid_restart_should_write = .FALSE.
 
       ! Spatial extent of most diffuse Gaussian primitive of AO/RI basis for each atom
       REAL(KIND=dp), ALLOCATABLE                       :: radius_ao_per_atom(:)

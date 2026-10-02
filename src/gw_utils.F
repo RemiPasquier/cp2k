@@ -53,7 +53,9 @@ MODULE gw_utils
                                               cp_fm_type
    USE cp_log_handling,                 ONLY: cp_get_default_logger,&
                                               cp_logger_type
-   USE cp_output_handling,              ONLY: cp_print_key_generate_filename
+   USE cp_output_handling,              ONLY: cp_p_file,&
+                                              cp_print_key_generate_filename,&
+                                              cp_print_key_should_output
    USE dbt_api,                         ONLY: &
         dbt_clear, dbt_create, dbt_destroy, dbt_filter, dbt_iterator_blocks_left, &
         dbt_iterator_next_block, dbt_iterator_start, dbt_iterator_stop, dbt_iterator_type, &
@@ -2435,13 +2437,12 @@ CONTAINS
 
       CHARACTER(LEN=9)                                   :: frmt
       CHARACTER(len=default_path_length)                 :: f_chi, f_s_n, f_s_p, f_s_x, f_w_t, &
-                                                            prefix, project_name, Z_lP_name
+                                                            grid_name, prefix, project_name, &
+                                                            Z_lP_name
       INTEGER                                            :: handle, i_spin, i_t_or_w, ind, n_spin, &
                                                             num_time_freq_points
-      LOGICAL                                            :: chi_exists, Sigma_neg_time_exists, &
-                                                            Sigma_pos_time_exists, &
-                                                            Sigma_x_spin_exists, W_time_exists, &
-                                                            Z_lP_exists
+      LOGICAL :: chi_exists, grid_exists, Sigma_neg_time_exists, Sigma_pos_time_exists, &
+         Sigma_x_spin_exists, W_time_exists, Z_lP_exists
       TYPE(cp_logger_type), POINTER                      :: logger
       TYPE(section_vals_type), POINTER                   :: input, print_key
 
@@ -2527,6 +2528,14 @@ CONTAINS
          WRITE (Z_lP_name, '(3A)') TRIM(prefix), "Z_lP", ".matrix"
          INQUIRE (file=TRIM(Z_lP_name), exist=Z_lP_exists)
          bs_env%ri_rs%Z_lP_exists = Z_lP_exists
+         WRITE (grid_name, '(2A)') TRIM(prefix), 'RI_RS_grid.dat'
+         grid_exists = .FALSE.
+         IF (bs_env%para_env%is_source()) INQUIRE (file=TRIM(grid_name), exist=grid_exists)
+         CALL bs_env%para_env%bcast(grid_exists)
+         bs_env%ri_rs%grid_restart_exists = grid_exists
+         bs_env%ri_rs%grid_restart_should_write = &
+            BTEST(cp_print_key_should_output(logger%iter_info, input, &
+                                             'PROPERTIES%BANDSTRUCTURE%GW%PRINT%RESTART'), cp_p_file)
       END IF
 
       IF (bs_env%all_W_exist) THEN

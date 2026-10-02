@@ -13,6 +13,7 @@
 MODULE gw_ri_rs_grid_setup_main
    USE gw_ri_rs_grid_from_file,         ONLY: read_ri_rs_grid_from_file
    USE gw_ri_rs_grid_optimization,      ONLY: optimize_ri_rs_grid
+   USE gw_ri_rs_grid_restart,           ONLY: write_ri_rs_grid_restart
    USE kinds,                           ONLY: dp,&
                                               int_8
    USE particle_types,                  ONLY: particle_type
@@ -53,6 +54,10 @@ CONTAINS
          ! Read pretabulated atom-relative RI-RS grids from the data files
          CALL read_ri_rs_grid_from_file(bs_env)
 
+      END IF
+
+      IF (bs_env%ri_rs%grid_opt%enabled .AND. bs_env%ri_rs%grid_restart_should_write) THEN
+         CALL write_ri_rs_grid_restart(bs_env)
       END IF
 
       ! Move atom-relative grids to their atomic centres and collect the global grid.
