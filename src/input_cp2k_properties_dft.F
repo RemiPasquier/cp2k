@@ -2621,7 +2621,21 @@ CONTAINS
                           n_keywords=2, n_subsections=1, repeats=.FALSE.)
       CALL cp_print_key_section_create(print_key, __LOCATION__, "RESTART", &
                                        description="Controls the printing of restart files "// &
-                                       "for χ, W, Σ.", &
+                                       "for χ, W, Σ, Z_lP and an optimized RI-RS grid. "// &
+                                       "With GRID_OPTIMIZATION enabled, the final atom-relative grid is written as "// &
+                                       "<prefix>RI_RS_grid.dat after grid setup when this print key requests "// &
+                                       "file output. A present grid file is read automatically with "// &
+                                       "GRID_OPTIMIZATION enabled, even when RESTART is OFF. It is reused "// &
+                                       "only when identity, positions, grid/metric parameters, kind metadata, "// &
+                                       "AO/RI basis names and MAX_ITER match. Otherwise one warning is printed "// &
+                                       "and optimization starts from a freshly initialized grid. "// &
+                                       "Cold optimization invalidates only Z_lP; compatibility of χ/W/Σ restart "// &
+                                       "files remains the user's responsibility, as for other GW restarts. "// &
+                                       "It records AO and RI basis names, but not full basis definitions; "// &
+                                       "a changed definition with an unchanged name is not detected. "// &
+                                       "A v1 grid file is not reused when multiple kinds of one element have "// &
+                                       "different AO or RI basis names, because it does not record their "// &
+                                       "per-atom assignment.", &
                                        filename="", print_level=low_print_level, &
                                        common_iter_levels=3)
       CALL section_add_subsection(subsection, print_key)
