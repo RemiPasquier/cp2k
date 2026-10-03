@@ -2628,9 +2628,13 @@ CONTAINS
                                        "GRID_OPTIMIZATION enabled, even when RESTART is OFF. It is reused "// &
                                        "only when identity, positions, grid/metric parameters, kind metadata, "// &
                                        "AO/RI basis names and MAX_ITER match. Otherwise one warning is printed "// &
-                                       "and optimization starts from a freshly initialized grid. "// &
-                                       "Cold optimization invalidates only Z_lP; compatibility of χ/W/Σ restart "// &
-                                       "files remains the user's responsibility, as for other GW restarts. "// &
+                                       "and optimization starts from a freshly initialized grid, unless "// &
+                                       "WARM_START accepts a valid file differing only in positions, grid/metric "// &
+                                       "parameters, MAX_ITER or AO/RI basis names. In that case an informational "// &
+                                       "line is printed and the stored atom-relative points initialize a new "// &
+                                       "optimization. Any optimization invalidates only Z_lP; compatibility of "// &
+                                       "χ/W/Σ restart files remains the user's responsibility, as for other GW "// &
+                                       "restarts. "// &
                                        "It records AO and RI basis names, but not full basis definitions; "// &
                                        "a changed definition with an unchanged name is not detected. "// &
                                        "A v1 grid file is not reused when multiple kinds of one element have "// &
@@ -2871,6 +2875,23 @@ CONTAINS
          description="Maximum number of objective-and-gradient evaluations in the single "// &
          "cooperative Cartesian grid optimization.", &
          usage="MAX_ITER 300", default_i_val=300)
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+
+      CALL keyword_create( &
+         keyword, __LOCATION__, name="WARM_START", &
+         description="Use a valid automatic grid restart as the initial grid when only positions, "// &
+         "grid/metric parameters, MAX_ITER or AO/RI basis names differ. Atom count, elements, "// &
+         "per-atom point counts and kind metadata must match, and per-atom basis assignments "// &
+         "must be unambiguous. Atom-relative points are placed at the current atom positions. "// &
+         "The current MAX_ITER caps objective-and-gradient evaluations for the warm optimization; "// &
+         "L-BFGS may stop earlier and a final objective evaluation follows. "// &
+         "An exact match is reused without optimization for either value. "// &
+         "The default FALSE retains exact-reuse-only behavior and cold optimization on a mismatch. "// &
+         "Any optimization invalidates only Z_lP; compatibility of χ/W/Σ restart files "// &
+         "remains the user's responsibility.", &
+         usage="WARM_START [TRUE|FALSE]", type_of_var=logical_t, &
+         default_l_val=.FALSE., lone_keyword_l_val=.TRUE.)
       CALL section_add_keyword(section, keyword)
       CALL keyword_release(keyword)
 

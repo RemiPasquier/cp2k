@@ -361,6 +361,7 @@ CONTAINS
 
       CALL section_vals_val_get(grid_opt_sec, "CUTOFF_ATOMIC_CLUSTER", r_val=grid_opt%cutoff_atomic_cluster)
       CALL section_vals_val_get(grid_opt_sec, "MAX_ITER", i_val=grid_opt%max_iter)
+      CALL section_vals_val_get(grid_opt_sec, "WARM_START", l_val=grid_opt%warm_start)
       CALL section_vals_val_get(grid_opt_sec, "RS_AO_RATIO", r_val=grid_opt%rs_ao_ratio)
       IF (grid_opt%rs_ao_ratio <= 0.0_dp) THEN
          CPABORT("RS_AO_RATIO must be positive")

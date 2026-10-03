@@ -502,6 +502,12 @@ registry["RIRS_Grid_Restart_Not_Used_Identity"] = TextPresenceMatcher(
 registry["RIRS_Grid_Restart_Corrupt"] = TextPresenceMatcher(
     "WARNING: RI-RS grid restart not used: corrupt point record for atom 1"
 )
+registry["RIRS_Grid_Restart_Warm_Start_Positions"] = TextPresenceMatcher(
+    "RI-RS grid restart used as warm start: positions differ"
+)
+registry["RIRS_Grid_Restart_Warm_Start_Max_Iter"] = TextPresenceMatcher(
+    "RI-RS grid restart used as warm start: MAX_ITER differ"
+)
 registry["RIRS_Grid_Optimization_Completed"] = TextPresenceMatcher(
     "RI-RS grid optimization completed, execution time:"
 )
