@@ -2,4 +2,5 @@
 @SET GW_RESTART OFF
 @SET MAX_ITER 4
 @SET H1_X 0.7571
+@SET WARM 0
 @INCLUDE rirs-grid-auto-H2O.inc

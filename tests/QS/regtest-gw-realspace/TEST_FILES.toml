@@ -91,4 +91,31 @@
                                        {matcher="E_RIRS_HOMO", tol=1e-3, ref=-6.096},
                                        {matcher="E_RIRS_LUMO", tol=1e-3, ref=17.684},
                                        {matcher="E_G0W0_direct_gap", tol=1e-3, ref=23.780}]
+# The WARM fixtures below are a real 24-point grid written by rirs-grid-auto-1-write-H2O.inp (MAX_ITER 5),
+# so the warm start begins from an optimized grid (the other fixtures are synthetic and only ever rejected).
+# Independent project with its own committed baseline fixture (MAX_ITER 5); warm budget is 6.
+"rirs-grid-auto-2d-maxiter-warm-H2O.inp" = [{matcher="RIRS_Grid_Restart_Warm_Start_Max_Iter"},
+                                           {matcher="RIRS_Grid_Optimization_Completed"},
+                                           {matcher="NO_TEXT", text="RI-RS grid reused without optimization:"},
+                                           {matcher="NO_TEXT", text="WARNING: RI-RS grid restart not used:"},
+                                           {matcher="RIRS_Grid", tol=1e-12, ref=24}]
+# Independent project with its own committed baseline fixture; moved H and opt-in warm optimization.
+"rirs-grid-auto-3b-warm-H2O.inp" = [{matcher="RIRS_Grid_Restart_Warm_Start_Positions"},
+                                    {matcher="RIRS_Grid_Optimization_Completed"},
+                                    {matcher="NO_TEXT", text="RI-RS grid reused without optimization:"},
+                                    {matcher="NO_TEXT", text="WARNING: RI-RS grid restart not used:"},
+                                    {matcher="RIRS_Grid", tol=1e-12, ref=24},
+                                    {matcher="E_RIRS_HOMO", tol=1e-3, ref=-6.088}]
+# WARM_START does not change exact reuse: a matching file is still reused without optimization.
+"rirs-grid-auto-2e-exact-warm-H2O.inp" = [{matcher="RIRS_Grid_Restart_Reused", tol=1e-12, ref=24},
+                                         {matcher="NO_TEXT", text="RI-RS grid optimization completed,"},
+                                         {matcher="NO_TEXT", text="RI-RS grid restart used as warm start:"},
+                                         {matcher="NO_TEXT", text="WARNING: RI-RS grid restart not used:"},
+                                         {matcher="RIRS_Grid", tol=1e-12, ref=24}]
+# WARM_START does not rescue a hard failure (wrong atom count): warning and cold optimization.
+"rirs-grid-auto-4b-hard-warm-H2O.inp" = [{matcher="RIRS_Grid_Restart_Not_Used_Identity"},
+                                        {matcher="RIRS_Grid_Optimization_Completed"},
+                                        {matcher="NO_TEXT", text="RI-RS grid reused without optimization:"},
+                                        {matcher="NO_TEXT", text="RI-RS grid restart used as warm start:"},
+                                        {matcher="RIRS_Grid", tol=1e-12, ref=24}]
 #EOF

@@ -57,6 +57,9 @@
             CUTOFF_ATOMIC_CLUSTER [angstrom] 3.0
             MAX_ITER ${MAX_ITER}
             RS_AO_RATIO 3.2
+            @IF ${WARM}
+            WARM_START
+            @ENDIF
           &END GRID_OPTIMIZATION
         &END RI_RS
       &END GW

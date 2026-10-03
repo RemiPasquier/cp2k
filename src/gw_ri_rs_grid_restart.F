@@ -9,7 +9,8 @@
 !>
 !> The versioned formatted file stores atom-relative points, positions, the four grid/metric
 !> parameters, MAX_ITER of the writing run and AO/RI basis names. Only a matching file is reused;
-!> any difference or corrupt record leaves the freshly initialized grid for cold optimization.
+!> by default, any difference or corrupt record leaves the freshly initialized grid for cold optimization.
+!> WARM_START permits validated soft mismatches to initialize a new optimization with loaded points.
 !> Basis definitions are not serialized: changes under the same name are not detected.
 ! **************************************************************************************************
 MODULE gw_ri_rs_grid_restart
@@ -59,6 +60,13 @@ CONTAINS
             IF (max_iter_diff) reason = TRIM(reason)//' MAX_ITER, '
             IF (LEN_TRIM(reason) > 0) THEN
                reason = TRIM(ADJUSTL(reason(:LEN_TRIM(reason) - 1)))//' differ'
+               ! A kind-metadata difference cannot establish the v1 per-atom basis assignment.
+               IF (bs_env%ri_rs%grid_opt%warm_start .AND. .NOT. kind_diff) THEN
+                  status = 2
+                  DO iatom = 1, bs_env%n_atom
+                     bs_env%ri_rs%atomic_grids(iatom)%raw_points(:, :) = loaded_grids(iatom)%raw_points
+                  END DO
+               END IF
             ELSE
                status = 1
                DO iatom = 1, bs_env%n_atom
@@ -77,6 +85,8 @@ CONTAINS
          IF (exact_reuse) THEN
             WRITE (bs_env%unit_nr, '(T2,A,I0,A)') 'RI-RS grid reused without optimization: ', &
                SUM(bs_env%ri_rs%atomic_grids(:)%npts), ' points'
+         ELSE IF (status == 2) THEN
+            WRITE (bs_env%unit_nr, '(T2,A,A)') 'RI-RS grid restart used as warm start: ', TRIM(reason)
          ELSE
             WRITE (bs_env%unit_nr, '(A,A)') 'WARNING: RI-RS grid restart not used: ', TRIM(reason)
          END IF
@@ -87,7 +97,7 @@ CONTAINS
 !> \brief Validate one grid restart on the I/O rank without changing the initialized grids.
 !> \param bs_env Bandstructure state containing the freshly initialized grid.
 !> \param filename Restart filename.
-!> \param grids Temporary atom-relative grids, installed only on exact reuse.
+!> \param grids Temporary atom-relative grids, installed on exact reuse or an eligible opt-in warm start.
 !> \param reason Nonempty reason when parsing or hard identity fails.
 !> \param basis_diff Whether AO or RI basis names differ.
 !> \param kind_diff Whether the number or elements of kinds differ.
@@ -106,6 +116,7 @@ CONTAINS
 
       CHARACTER(LEN=4*default_path_length)               :: line
       CHARACTER(LEN=default_path_length)                 :: fields(6)
+      CHARACTER(LEN=default_path_length), ALLOCATABLE    :: kind_metadata(:, :)
       INTEGER                                            :: current_nkind, iatom, ikind, ios, ipt, &
                                                             jkind, kind_file, max_iter_file, &
                                                             natom_file, nkind_file, npts, u
@@ -177,6 +188,9 @@ CONTAINS
          END IF
       END IF
       IF (LEN_TRIM(reason) == 0) kind_diff = nkind_file /= current_nkind
+      IF (bs_env%ri_rs%grid_opt%warm_start .AND. LEN_TRIM(reason) == 0) THEN
+         ALLOCATE (kind_metadata(3, nkind_file))
+      END IF
       DO ikind = 1, nkind_file
          IF (LEN_TRIM(reason) > 0) EXIT
          CALL read_grid_record(u, fields(:5), valid)
@@ -190,7 +204,22 @@ CONTAINS
             basis_diff = basis_diff .OR. fields(4) /= bs_env%basis_set_AO(ikind)%gto_basis_set%name .OR. &
                          fields(5) /= bs_env%basis_set_RI(ikind)%gto_basis_set%name
          END IF
+         IF (bs_env%ri_rs%grid_opt%warm_start .AND. LEN_TRIM(reason) == 0) THEN
+            kind_metadata(:, ikind) = fields(3:5)
+         END IF
       END DO
+      ! v1 has no per-atom kind index: also reject ambiguous assignments in the stored metadata.
+      ! Keep this extra check opt-in so the default read/validation path is unchanged.
+      IF (bs_env%ri_rs%grid_opt%warm_start .AND. LEN_TRIM(reason) == 0) THEN
+         DO ikind = 1, nkind_file
+            DO jkind = 1, ikind - 1
+               IF (kind_metadata(1, ikind) /= kind_metadata(1, jkind)) CYCLE
+               IF (ANY(kind_metadata(2:3, ikind) /= kind_metadata(2:3, jkind))) THEN
+                  reason = 'per-atom basis assignment is unavailable in v1'
+               END IF
+            END DO
+         END DO
+      END IF
       IF (LEN_TRIM(reason) == 0) ALLOCATE (grids(bs_env%n_atom))
       DO iatom = 1, bs_env%n_atom
          IF (LEN_TRIM(reason) > 0) EXIT
