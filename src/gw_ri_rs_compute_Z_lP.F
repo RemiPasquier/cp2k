@@ -804,8 +804,7 @@ CONTAINS
       TYPE(dbcsr_type), INTENT(INOUT)                    :: mat_phi_mu_l
       TYPE(dbcsr_type), INTENT(OUT)                      :: mat_Z_lP
 
-      CHARACTER(LEN=*), PARAMETER :: key = 'PROPERTIES%BANDSTRUCTURE%GW%PRINT%RESTART', &
-         routineN = 'compute_Z_lP_auto_ri'
+      CHARACTER(LEN=*), PARAMETER :: routineN = 'compute_Z_lP_auto_ri'
 
       INTEGER :: AB_block, atom_A, atom_B, block_size_b, column_first, first_p_AB, fit_atom, &
          handle, handle_dpotrf, handle_dpotrs, info, max_ao_size, max_nRI_ref, mypcol, myprow, &
@@ -825,23 +824,25 @@ CONTAINS
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)     :: U_Pp_by_atom
       REAL(KIND=dp), DIMENSION(3)                        :: center
       TYPE(cell_type), POINTER                           :: cell
-      TYPE(cp_logger_type), POINTER                      :: logger
       TYPE(dbcsr_distribution_type)                      :: dist_Z
       TYPE(dbcsr_type)                                   :: mat_rhs
       TYPE(gw_3c_ctx_type)                               :: ctx_3c
       TYPE(mp_para_env_type), POINTER                    :: para_env, para_env_col
       TYPE(particle_type), DIMENSION(:), POINTER         :: particle_set
       TYPE(qs_kind_type), DIMENSION(:), POINTER          :: qs_kind_set
-      TYPE(section_vals_type), POINTER                   :: input
 
       CALL timeset(routineN, handle)
       t1 = m_walltime()
       IF (bs_env%unit_nr > 0) THEN
          WRITE (bs_env%unit_nr, '(A)') ' '
+         ! AUTO_RI always recomputes Z_lP and does not write it: the file would be read by a later run
+         ! without AUTO_RI, whose RI basis differs.
+         IF (bs_env%ri_rs%Z_lP_exists) WRITE (bs_env%unit_nr, '(T2,A)') &
+            'Z_lP restart file found but not used with AUTO_RI'
          WRITE (bs_env%unit_nr, '(T2,A)') 'Started computing Z_lP'
          CALL m_flush(bs_env%unit_nr)
       END IF
-      CALL get_qs_env(qs_env, para_env=para_env, particle_set=particle_set, input=input, &
+      CALL get_qs_env(qs_env, para_env=para_env, particle_set=particle_set, &
                       qs_kind_set=qs_kind_set, cell=cell)
       NULLIFY (para_env_col)
 
@@ -1055,10 +1056,6 @@ CONTAINS
       CALL para_env%sync()
       CALL print_Z_lP_progress(bs_env, natom, natom, m_walltime() - t1, &
                                all_mpi_ranks=.TRUE.)
-      logger => cp_get_default_logger()
-      IF (BTEST(cp_print_key_should_output(logger%iter_info, input, key), cp_p_file)) THEN
-         CALL dbcsr_binary_write(matrix=mat_Z_lP, filepath=TRIM(bs_env%prefix)//'Z_lP.matrix')
-      END IF
 
       DEALLOCATE (row_offset, ri_blk_sizes, col_dist_ri)
       CALL dbcsr_distribution_release(dist_Z)
